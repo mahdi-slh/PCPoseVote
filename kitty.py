@@ -119,11 +119,13 @@ class KittyDataset(torch_data.Dataset):
         return dist < epsilon
 
     def show_points(self, points, gt):
+        points = points.cpu().numpy()
+        gt = gt.cpu().numpy()
         idx = int(gt[11])
         s = int(self.image_idx_list[idx])
         image = cv2.imread(os.path.join(self.image_dir, '%06d.png' % s))
 
-        P2, R0, Tr = train_set.all_calib['P2'][idx], train_set.all_calib['R0'][idx], train_set.all_calib['Tr'][idx]
+        P2, R0, Tr = self.all_calib['P2'][idx], self.all_calib['R0'][idx], self.all_calib['Tr'][idx]
 
         x = np.ones((points.shape[0], 4))
         x[0:points.shape[0], 0:3] = points
@@ -168,7 +170,7 @@ class KittyDataset(torch_data.Dataset):
                        center=(int(all_points[0][i] / all_points[2][i]), int(all_points[1][i] / all_points[2][i])),
                        radius=1, color=[0, 255, 255])
         self.temp = self.temp + 1
-        cv2.imwrite("segmentation" + str(self.temp) + ".png", image)
+        cv2.imwrite("points" + str(self.temp) + ".png", image)
 
         inv = np.linalg.pinv(Tr) @ np.linalg.pinv(R0)
         f = np.ndarray((4, 1))
@@ -210,13 +212,15 @@ class KittyDataset(torch_data.Dataset):
         path = os.path.join(self.lidar_dir, '%06d.bin' % s)
         label_path = os.path.join(self.label_dir, '%06d.txt' % s)
         lines = [x.strip() for x in open(label_path).readlines()]
-        gt = -np.ones((self.max_objects, 12))
+        gt = -np.ones((self.max_objects, 13))
         ind = -1
+        inds = []
         for i in range(len(lines)):
             r = lines[i].split(' ')
             if self.class_map[r[0]] not in self.classes:
                 continue
             ind = ind + 1
+            inds.append(ind)
             gt[ind][0] = self.class_map[r[0]]  # class
             gt[ind][1] = float(r[1])  # truncated
             gt[ind][2] = float(r[2])  # occluded
@@ -246,11 +250,20 @@ class KittyDataset(torch_data.Dataset):
         random_indices = np.random.choice(t.shape[0], self.npoints, replace=True)
 
         t = t[random_indices, :3]
+
+        corresponding_bbox = np.ones((t.shape[0],)) * -1
+        for i in inds:
+            inside_points, _ = self.object_points(t, gt[i])
+            corresponding_bbox[inside_points] = i
+
         t = t.astype(float)
 
-        return t, gt
+        return t, gt, corresponding_bbox
 
-    def dist(self, center: torch.Tensor, size: torch.Tensor, car_prob, gtt: torch.Tensor):
+    def dist(self, center: torch.Tensor, size: torch.Tensor, car_prob, gtt: torch.Tensor,
+             bboxes: torch.Tensor, seed_inds: torch.Tensor):
+
+        bboxes = bboxes.long()
 
         idx = int(gtt[0][11])
         P2, R0, Tr = self.all_calib['P2'][idx], self.all_calib['R0'][idx], self.all_calib['Tr'][idx]
@@ -274,45 +287,31 @@ class KittyDataset(torch_data.Dataset):
         y_size = y_size.transpose(0, 1)
         y_size = y_size[:, 0:3]
 
-        dist = torch.ones(y_center.shape[0]).to(device) * 1
-        indices = np.ones((y_center.shape[0],)) * -1
-        for j in range(gtt.shape[0]):
-            gt = gtt[j]
+        loss = torch.zeros(1).to(device)
 
+        num = 0
+        for i in range(center.shape[0]):
+            if bboxes[seed_inds[i]] == -1:
+                continue
+
+            num = num + 1
+            gt = gtt[bboxes[seed_inds[i]]]
             R = torch.zeros(3, 3)
             R[0] = torch.tensor([torch.cos(gt[10]), 0.0, torch.sin(gt[10])])
             R[1] = torch.tensor([0, 1, 0])
             R[2] = torch.tensor([-torch.sin(gt[10]), 0.0, torch.cos(gt[10])])
             center = (gt[7:10]).detach().clone().to(device)
-            extents = torch.zeros(3)
+            extents = torch.zeros(3).to(device)
             extents[0] = (gt[6]).detach().clone()
             extents[1] = (gt[5]).detach().clone()
             extents[2] = (gt[4]).detach().clone()
             center[1] = center[1] - extents[1] / 2
-            for i in range(y_center.shape[0]):
-                if dist[i] < torch.mean(torch.abs(y_center[i] - center)).to(device):
-                    indices[i] = j
 
-        loss = torch.zeros(1).to(device)
-        for i in range(y_center.shape[0]):
-            if indices[i] != -1:
-                gt = gtt[int(indices[i])]
-                R = torch.zeros(3, 3)
-                R[0] = torch.tensor([torch.cos(gt[10]), 0.0, torch.sin(gt[10])])
-                R[1] = torch.tensor([0, 1, 0])
-                R[2] = torch.tensor([-torch.sin(gt[10]), 0.0, torch.cos(gt[10])])
-                center = (gt[7:10]).detach().clone().to(device)
-                extents = torch.zeros(3).to(device)
-                extents[0] = (gt[6]).detach().clone().to(device)
-                extents[1] = (gt[5]).detach().clone().to(device)
-                extents[2] = (gt[4]).detach().clone().to(device)
-                center[1] = center[1] - extents[1] / 2
-                loss = loss + torch.mean(torch.abs(y_center[i] - center) + torch.abs(y_size[i] - extents)) - torch.log(
-                    car_prob[i])
-            else:
-                loss = loss - torch.log(1 - car_prob[i])
+            loss = loss + torch.sum((center - y_center[i]) ** 2) + torch.sum((extents - y_size[i]) ** 2)
 
-        return loss
+            # print(torch.sum((center - y_center[i]) ** 2) + torch.sum((extents - y_size[i]) ** 2))
+
+        return loss/num
 
     def object_points(self, p, gt):
         idx = int(gt[11])
@@ -377,7 +376,7 @@ if __name__ == '__main__':
     train_set = KittyDataset('F:\data_object_velodyne', split='test')
     idx = 1238
 
-    points, gt = train_set.__getitem__(idx)
+    points, gt, corresponding_bbox = train_set.__getitem__(idx)
     # train_set.draw_3dBox(gt[1])
     # train_set.show_points(points, gt[0])
     train_set.object_points(points, gt[0])

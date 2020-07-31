@@ -60,6 +60,7 @@ class VotingModule(nn.Module):
 
         return vote_xyz, vote_features
 
+
 def index_points(points, idx):
     """
 
@@ -160,7 +161,7 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
     return group_idx
 
 
-def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False):
+def sample_and_group(npoint, radius, nsample, xyz, points, seed_inds, returnfps=False):
     """
     Input:
         npoint:
@@ -174,8 +175,14 @@ def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False):
     """
     B, N, C = xyz.shape
     S = npoint
-    fps_idx = farthest_point_sample(xyz, npoint)  # [B, npoint, C]
+    fps_idx = farthest_point_sample(xyz, npoint)  # [B, npoint]
+
+    this_seed_inds = torch.ones(B, npoint,dtype=torch.long)
+    for i in range(B):
+        this_seed_inds[i] = seed_inds[i, fps_idx[i, :]]
+
     torch.cuda.empty_cache()
+
     new_xyz = index_points(xyz, fps_idx)
     torch.cuda.empty_cache()
     idx = query_ball_point(radius, nsample, xyz, new_xyz)
@@ -191,12 +198,12 @@ def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False):
     else:
         new_points = grouped_xyz_norm
     if returnfps:
-        return new_xyz, new_points, grouped_xyz, fps_idx
+        return new_xyz, new_points, grouped_xyz, fps_idx, this_seed_inds
     else:
-        return new_xyz, new_points
+        return new_xyz, new_points, this_seed_inds
 
 
-def sample_and_group_all(xyz, points):
+def sample_and_group_all(xyz, points, seed_inds):
     """
     Input:
         xyz: input points position data, [B, N, 3]
@@ -213,7 +220,7 @@ def sample_and_group_all(xyz, points):
         new_points = torch.cat([grouped_xyz, points.view(B, 1, N, -1)], dim=-1)
     else:
         new_points = grouped_xyz
-    return new_xyz, new_points
+    return new_xyz, new_points, seed_inds
 
 
 class PointNetSetAbstraction(nn.Module):
@@ -232,7 +239,7 @@ class PointNetSetAbstraction(nn.Module):
             last_channel = out_channel
         self.group_all = group_all
 
-    def forward(self, xyz, points):
+    def forward(self, xyz, points, seed_inds):
         """
         Input:
             xyz: input points position data, [B, C, N]
@@ -253,9 +260,10 @@ class PointNetSetAbstraction(nn.Module):
             points = points.permute(0, 2, 1)
 
         if self.group_all:
-            new_xyz, new_points = sample_and_group_all(xyz, points)
+            new_xyz, new_points, seed_inds = sample_and_group_all(xyz, points, seed_inds)
         else:
-            new_xyz, new_points = sample_and_group(self.npoint, self.radius, self.nsample, xyz, points)
+            new_xyz, new_points, seed_inds = sample_and_group(self.npoint, self.radius, self.nsample, xyz, points,
+                                                              seed_inds)
 
         # new_xyz: sampled points position data, [B, npoint, C]
         # new_points: sampled points data, [B, npoint, nsample, C+D]
@@ -273,7 +281,7 @@ class PointNetSetAbstraction(nn.Module):
 
         new_points = torch.max(new_points, 2)[0]
         new_xyz = new_xyz.permute(0, 2, 1)
-        return new_xyz, new_points
+        return new_xyz, new_points, seed_inds
 
 
 class PointNetFeaturePropagation(nn.Module):
@@ -363,7 +371,7 @@ class ProposalModule(nn.Module):
         self.bn1 = torch.nn.BatchNorm1d(128)
         self.bn2 = torch.nn.BatchNorm1d(128)
 
-    def forward(self, xyz, features):
+    def forward(self, xyz, features, seed_inds):
         """
         Args:
             xyz: (B,K,3)
@@ -373,13 +381,13 @@ class ProposalModule(nn.Module):
         """
 
         # Farthest point sampling (FPS) on votes
-        xyz, features = self.vote_aggregation(xyz, features)
+        xyz, features, seed_inds = self.vote_aggregation(xyz, features, seed_inds)
         # --------- PROPOSAL GENERATION ---------
         net = F.relu(self.bn1(self.conv1(features)))
         net = F.relu(self.bn2(self.conv2(net)))
         net = self.conv3(net)  # (batch_size, 2+3+num_heading_bin*2+num_size_cluster*4, num_proposal)
 
-        return net
+        return net, seed_inds
 
 
 class Votenet(nn.Module):
@@ -402,15 +410,15 @@ class Votenet(nn.Module):
                                           mlp=[128, 128, 128], group_all=False)
         self.sa2 = PointNetSetAbstraction(npoint=128, radius=0.4, nsample=64, in_channel=128 + 3,
                                           mlp=[128, 128, 256], group_all=False)
-        self.sa3 = PointNetSetAbstraction(npoint=64, radius=None, nsample=None, in_channel=256 + 3,
-                                          mlp=[256, 256, 512], group_all=True)
+        self.sa3 = PointNetSetAbstraction(npoint=64, radius=0.8, nsample=64, in_channel=256 + 3,
+                                          mlp=[256, 256, 512], group_all=False)
         self.fp3 = PointNetFeaturePropagation(in_channel=768, mlp=[256, 256])
         self.fp2 = PointNetFeaturePropagation(in_channel=384, mlp=[256, 128])
         self.vgen = VotingModule(self.vote_factor, 128)
         self.pnet = ProposalModule(num_class, num_heading_bin, num_size_cluster,
                                    mean_size_arr, num_proposal, sampling, in_channel=131)
 
-    def forward(self, xyz):
+    def forward(self, xyz, seed_inds):
         # Set Abstraction layers
 
         xyz = xyz.permute(0, 2, 1)
@@ -418,12 +426,13 @@ class Votenet(nn.Module):
 
         l0_xyz = xyz
 
-        l1_xyz, l1_points = self.sa1(l0_xyz, None)
+        l1_xyz, l1_points, seed_inds = self.sa1(l0_xyz, None, seed_inds)
         torch.cuda.empty_cache()
-        l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
+        l2_xyz, l2_points, _ = self.sa2(l1_xyz, l1_points, seed_inds)
         torch.cuda.empty_cache()
-        l3_xyz, l3_points = self.sa3(l2_xyz, l2_points)
+        l3_xyz, l3_points, _ = self.sa3(l2_xyz, l2_points, seed_inds)
         torch.cuda.empty_cache()
+
         # Feature Propagation layers
 
         l2_points = self.fp3(l2_xyz, l3_xyz, l2_points, l3_points)
@@ -439,8 +448,9 @@ class Votenet(nn.Module):
             features.shape = [B,128,4096]
         """
 
-        end_points = self.pnet(l1_xyz, features)
-        return l1_xyz, vote_xyz, end_points
+        end_points, seed_inds = self.pnet(l1_xyz, features, seed_inds)
+
+        return l1_xyz, vote_xyz, end_points, seed_inds
 
 
 if __name__ == '__main__':
@@ -451,30 +461,35 @@ if __name__ == '__main__':
     torch.multiprocessing.freeze_support()
 
     train_set = KittyDataset(PATH)
-    train_loader = torch_data.DataLoader(train_set, shuffle=True, batch_size=16, num_workers=1)
+    train_loader = torch_data.DataLoader(train_set, shuffle=True, batch_size=batch_size, num_workers=1)
     model = Votenet(num_class=2, num_heading_bin=2, num_size_cluster=2, mean_size_arr=np.zeros((3, 1)),
                     input_feature_dim=2)
     model.to(device)
     torch.multiprocessing.freeze_support()
     optimizer = optim.SGD(model.parameters(), lr=0.0001, momentum=0.9)
 
-    checkpoint = torch.load(SAVE_PATH)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    epoch = checkpoint['epoch']
+    # checkpoint = torch.load(SAVE_PATH)
+    # model.load_state_dict(checkpoint['model_state_dict'])
+    # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    # epoch = checkpoint['epoch']
 
     for epoch in range(1, epoch_num + 1):
         for i, data in enumerate(train_loader, 0):
             print("epoch ", epoch, " step ", i + 1)
-            data, gt = data
+            data, gt, corresponding_bbox = data
+
             data = data.to(torch.float32)
             data = data.to(device)
-            l1_xyz, vote_xyz, aggregation = model(data)
+
+
+            initial_inds = torch.unsqueeze(torch.arange(start=0, end=data.shape[1]), 0).repeat(data.shape[0], 1)
+
+            l1_xyz, vote_xyz, aggregation, seed_inds = model(data, initial_inds)
 
             optimizer.zero_grad()
             # forward + backward + optimize
-            vote_loss = loss.compute_vote_loss(gt, l1_xyz, vote_xyz, train_set)*100
-            box_loss = loss.compute_box_loss(gt, aggregation, train_set)
+            vote_loss = loss.compute_vote_loss(gt, l1_xyz, vote_xyz, train_set)
+            box_loss = loss.compute_box_loss(gt,corresponding_bbox, aggregation,seed_inds, train_set)
             print("vote loss: ", vote_loss)
             print("box loss: ", box_loss)
             loss1 = torch.sum(vote_loss + box_loss)
