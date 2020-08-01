@@ -212,7 +212,7 @@ class KittyDataset(torch_data.Dataset):
         path = os.path.join(self.lidar_dir, '%06d.bin' % s)
         label_path = os.path.join(self.label_dir, '%06d.txt' % s)
         lines = [x.strip() for x in open(label_path).readlines()]
-        gt = -np.ones((self.max_objects, 13))
+        gt = -np.ones((self.max_objects, 12))
         ind = -1
         inds = []
         for i in range(len(lines)):
@@ -261,7 +261,7 @@ class KittyDataset(torch_data.Dataset):
         return t, gt, corresponding_bbox
 
     def dist(self, center: torch.Tensor, size: torch.Tensor, car_prob, gtt: torch.Tensor,
-             bboxes: torch.Tensor, seed_inds: torch.Tensor):
+             bboxes: torch.Tensor, angle: torch.Tensor, seed_inds: torch.Tensor):
 
         bboxes = bboxes.long()
 
@@ -296,22 +296,24 @@ class KittyDataset(torch_data.Dataset):
 
             num = num + 1
             gt = gtt[bboxes[seed_inds[i]]]
-            R = torch.zeros(3, 3)
-            R[0] = torch.tensor([torch.cos(gt[10]), 0.0, torch.sin(gt[10])])
-            R[1] = torch.tensor([0, 1, 0])
-            R[2] = torch.tensor([-torch.sin(gt[10]), 0.0, torch.cos(gt[10])])
-            center = (gt[7:10]).detach().clone().to(device)
+
+            z = torch.from_numpy(self.get_rect_points(gt.numpy())).float().to(device)
+
             extents = torch.zeros(3).to(device)
-            extents[0] = (gt[6]).detach().clone()
-            extents[1] = (gt[5]).detach().clone()
-            extents[2] = (gt[4]).detach().clone()
-            center[1] = center[1] - extents[1] / 2
+            center = torch.zeros(3).to(device)
 
-            loss = loss + torch.sum((center - y_center[i]) ** 2) + torch.sum((extents - y_size[i]) ** 2)
+            extents[0] = torch.abs(z[0][0] - z[0][7])
+            extents[1] = torch.abs(z[1][0] - z[1][7])
+            extents[2] = torch.abs(z[2][0] - z[2][1])
 
-            # print(torch.sum((center - y_center[i]) ** 2) + torch.sum((extents - y_size[i]) ** 2))
+            center[0] = (z[0][0] + z[0][7]) / 2
+            center[1] = (z[1][0] + z[1][7]) / 2
+            center[2] = (z[2][0] + z[2][1]) / 2
 
-        return loss/num
+            loss = loss + torch.sum((center - y_center[i]) ** 2) + torch.sum((extents - y_size[i]) ** 2) + (
+                    angle[i] - gt[10]) ** 2
+
+        return loss / num
 
     def object_points(self, p, gt):
         idx = int(gt[11])
