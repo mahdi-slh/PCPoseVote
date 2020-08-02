@@ -177,7 +177,7 @@ def sample_and_group(npoint, radius, nsample, xyz, points, seed_inds, returnfps=
     S = npoint
     fps_idx = farthest_point_sample(xyz, npoint)  # [B, npoint]
 
-    this_seed_inds = torch.ones(B, npoint,dtype=torch.long)
+    this_seed_inds = torch.ones(B, npoint, dtype=torch.long)
     for i in range(B):
         this_seed_inds[i] = seed_inds[i, fps_idx[i, :]]
 
@@ -264,7 +264,6 @@ class PointNetSetAbstraction(nn.Module):
         else:
             new_xyz, new_points, seed_inds = sample_and_group(self.npoint, self.radius, self.nsample, xyz, points,
                                                               seed_inds)
-
         # new_xyz: sampled points position data, [B, npoint, C]
         # new_points: sampled points data, [B, npoint, nsample, C+D]
         new_points = new_points.permute(0, 3, 2, 1)  # [B, C+D, nsample,npoint]
@@ -374,7 +373,7 @@ class ProposalModule(nn.Module):
     def forward(self, xyz, features, seed_inds):
         """
         Args:
-            xyz: (B,K,3)
+            xyz: (B,3,K)
             features: (B,C,K)
         Returns:
             scores: (B,num_proposal,2+3+NH*2+NS*4)
@@ -382,6 +381,7 @@ class ProposalModule(nn.Module):
 
         # Farthest point sampling (FPS) on votes
         xyz, features, seed_inds = self.vote_aggregation(xyz, features, seed_inds)
+
         # --------- PROPOSAL GENERATION ---------
         net = F.relu(self.bn1(self.conv1(features)))
         net = F.relu(self.bn2(self.conv2(net)))
@@ -392,7 +392,7 @@ class ProposalModule(nn.Module):
 
 class Votenet(nn.Module):
     def __init__(self, num_class, num_heading_bin, num_size_cluster, mean_size_arr,
-                 input_feature_dim=0, num_proposal=128, vote_factor=1, sampling='vote_fps'):
+                 input_feature_dim=0, num_proposal=num_proposal, vote_factor=1, sampling='vote_fps'):
         self.num_class = num_class
         self.num_heading_bin = num_heading_bin
         self.num_size_cluster = num_size_cluster
@@ -454,10 +454,7 @@ class Votenet(nn.Module):
 
 
 if __name__ == '__main__':
-    PATH = 'F:\data_object_velodyne'
-    SAVE_PATH = PATH + '\model.pth'
 
-    epoch_num = 20
     torch.multiprocessing.freeze_support()
 
     train_set = KittyDataset(PATH)
@@ -473,14 +470,16 @@ if __name__ == '__main__':
     # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     # epoch = checkpoint['epoch']
 
-    for epoch in range(1, epoch_num + 1):
+    epoch = 0
+
+
+    for epoch in range(epoch+1, epoch_num + 1):
         for i, data in enumerate(train_loader, 0):
             print("epoch ", epoch, " step ", i + 1)
             data, gt, corresponding_bbox = data
 
             data = data.to(torch.float32)
             data = data.to(device)
-
 
             initial_inds = torch.unsqueeze(torch.arange(start=0, end=data.shape[1]), 0).repeat(data.shape[0], 1)
 
@@ -489,12 +488,13 @@ if __name__ == '__main__':
             optimizer.zero_grad()
             # forward + backward + optimize
             vote_loss = loss.compute_vote_loss(gt, l1_xyz, vote_xyz, train_set)
-            box_loss = loss.compute_box_loss(gt,corresponding_bbox, aggregation,seed_inds, train_set)
+            box_loss = loss.compute_box_loss(gt, corresponding_bbox, aggregation, seed_inds, train_set)
             print("vote loss: ", vote_loss)
             print("box loss: ", box_loss)
             loss1 = torch.sum(vote_loss + box_loss)
             print("loss ", loss1)
             loss1.backward()
+
             optimizer.step()
 
             torch.save({

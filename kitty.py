@@ -92,7 +92,7 @@ class KittyDataset(torch_data.Dataset):
         corners_3d[1] = [0, 0, 0, 0, -h, -h, -h, -h]
         corners_3d[2] = [w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2]
 
-        corners_3d = np.matmul(R, corners_3d)
+        corners_3d = R @ corners_3d
 
         corners_3d[0, :] = corners_3d[0, :] + gt[7]
         corners_3d[1, :] = corners_3d[1, :] + gt[8]
@@ -197,7 +197,7 @@ class KittyDataset(torch_data.Dataset):
 
         pts_2D = pts_2D[0:2, :]
 
-        for i in range(0, 7):
+        for i in range(0, 8):
             # cv2.line(image, (int(pts_2D[0][i]), int(pts_2D[1][i])), (int(pts_2D[0][i + 1]), int(pts_2D[1][i + 1])),
             #          [255, 0, 0])
             cv2.circle(image, center=(int(pts_2D[0][i]), int(pts_2D[1][i])), radius=5, color=[255, 0, 0])
@@ -290,6 +290,7 @@ class KittyDataset(torch_data.Dataset):
         loss = torch.zeros(1).to(device)
 
         num = 0
+
         for i in range(center.shape[0]):
             if bboxes[seed_inds[i]] == -1:
                 continue
@@ -299,19 +300,11 @@ class KittyDataset(torch_data.Dataset):
 
             z = torch.from_numpy(self.get_rect_points(gt.numpy())).float().to(device)
 
-            extents = torch.zeros(3).to(device)
-            center = torch.zeros(3).to(device)
+            gt_extents = gt[4:7].to(device)
+            gt_center = gt[7:10].to(device)
+            gt_angle = gt[10].to(device)
 
-            extents[0] = torch.abs(z[0][0] - z[0][7])
-            extents[1] = torch.abs(z[1][0] - z[1][7])
-            extents[2] = torch.abs(z[2][0] - z[2][1])
-
-            center[0] = (z[0][0] + z[0][7]) / 2
-            center[1] = (z[1][0] + z[1][7]) / 2
-            center[2] = (z[2][0] + z[2][1]) / 2
-
-            loss = loss + torch.sum((center - y_center[i]) ** 2) + torch.sum((extents - y_size[i]) ** 2) + (
-                    angle[i] - gt[10]) ** 2
+            loss = loss + torch.sum((gt_center - y_center[i]) ** 2) + torch.sum((gt_extents - y_size[i]) ** 2) + (gt_angle-angle[i])**2
 
         return loss / num
 
@@ -376,9 +369,16 @@ class KittyDataset(torch_data.Dataset):
 
 if __name__ == '__main__':
     train_set = KittyDataset('F:\data_object_velodyne', split='test')
-    idx = 1238
+    idx = 1231
 
     points, gt, corresponding_bbox = train_set.__getitem__(idx)
     # train_set.draw_3dBox(gt[1])
     # train_set.show_points(points, gt[0])
-    train_set.object_points(points, gt[0])
+    # train_set.object_points(points, gt[0])
+
+    idx = int(gt[0][11])
+    s = int(train_set.image_idx_list[idx])
+    image = cv2.imread(os.path.join(train_set.image_dir, '%06d.png' % s))
+
+    P2, R0, Tr = train_set.all_calib['P2'][idx], train_set.all_calib['R0'][idx], train_set.all_calib['Tr'][idx]
+
