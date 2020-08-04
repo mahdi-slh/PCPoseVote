@@ -11,9 +11,9 @@ def compute_box_loss(gt: torch.Tensor, corresponding_bbox: torch.Tensor, output:
     loss = torch.zeros(B, ).to(device)
     for i in range(B):
         car_prob = 1 / (1 + torch.exp(output[i, 0, :]))
-        center = output[i, 1:4, :].transpose(1, 0).to(device)
-        size = output[i, 4:7, :].transpose(1, 0).to(device)
-        angle = output[i,7].to(device)
+        center = output[i, 1:4, :].transpose(1, 0)
+        size = output[i, 4:7, :].transpose(1, 0)
+        angle = output[i,7]
 
         loss[i] = train_dataset.dist(center, size, car_prob, gt[i],corresponding_bbox[i],angle,seed_inds[i])
 

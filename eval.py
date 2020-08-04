@@ -66,7 +66,7 @@ def show_points(points, votes, idx, image, line):
     return image
 
 
-def draw_3dBox(points, idx):
+def draw_3dBox(points, idx, gt):
     s = int(test_set.image_idx_list[idx])
     image = cv2.imread(os.path.join(test_set.image_dir, '%06d.png' % s))
 
@@ -75,49 +75,43 @@ def draw_3dBox(points, idx):
     center = points[1:4]
     size = points[4:7]
 
-    # z = torch.from_numpy(test_set.get_rect_points(gt.numpy())).float()
+    c = np.ones((4,1))
+    s = np.ones((4,1))
 
-    # extents = np.zeros((3,))
-    # gt_center = np.zeros((3,))
-    #
-    # extents[0] = torch.abs(z[0][0] - z[0][7])
-    # extents[1] = torch.abs(z[1][0] - z[1][7])
-    # extents[2] = torch.abs(z[2][0] - z[2][1])
-    #
-    # gt_center[0] = (z[0][0] + z[0][7]) / 2
-    # gt_center[1] = (z[1][0] + z[1][7]) / 2
-    # gt_center[2] = (z[2][0] + z[2][1]) / 2
+    c[0:3,0] = center
+    s[0:3,0] = size
 
-    cube = np.ones((8, 4))
-    cube[0, 0:3] = center + [+ size[0] / 2, + size[1] / 2, + size[2] / 2]
-    cube[1, 0:3] = center + [+ size[0] / 2, + size[1] / 2, - size[2] / 2]
-    cube[2, 0:3] = center + [+ size[0] / 2, - size[1] / 2, + size[2] / 2]
-    cube[3, 0:3] = center + [+ size[0] / 2, - size[1] / 2, - size[2] / 2]
-    cube[4, 0:3] = center + [- size[0] / 2, + size[1] / 2, + size[2] / 2]
-    cube[5, 0:3] = center + [- size[0] / 2, + size[1] / 2, - size[2] / 2]
-    cube[6, 0:3] = center + [- size[0] / 2, - size[1] / 2, + size[2] / 2]
-    cube[7, 0:3] = center + [- size[0] / 2, - size[1] / 2, - size[2] / 2]
-    # cube[:,0:3] = center
+    center = R0 @ Tr @ c
+    center = center/center[3]
+    center = center[0:3,0]
 
-    cube = np.transpose(cube)
+    size = R0 @ Tr @ s
+    size = size / size[3]
+    size = size[0:3,0]
 
-    cube = P2 @ R0 @ Tr @ cube
-    cube = cube / cube[2, :]
-    cube = np.transpose(cube)
-    cube = cube[:, 0:2]
 
-    c = np.ones((4, 1))
-    c[0:3, 0] = center
-    centerrrr = P2 @ R0 @ Tr @ c
-    centerrrr = centerrrr / centerrrr[2, :]
-    centerrrr = np.transpose(centerrrr)
-    centerrrr = centerrrr[:, 0:2]
+    gt[7:10] = center
+    gt[4:7] = size
+    gt[10] = points[7]
 
-    for index in range(cube.shape[0]):
-        z = cube[index]
+
+    bbox = test_set.get_rect_points(gt)
+
+    points = P2 @ bbox
+
+    points = points / points[2, :]
+    points = np.transpose(points)
+
+    for index in range(points.shape[0]):
+        z = points[index]
         cv2.circle(image, center=(int(z[0]), int(z[1])), radius=10, color=[0, 0, 255])
 
-    cv2.circle(image, center=(int(centerrrr[0][0]), int(centerrrr[0][1])), radius=10, color=[0, 255, 255])
+    centerrr = gt[7:10]
+    cen = np.ones((4, 1))
+    cen[0:3, 0] = centerrr
+    cen = P2 @ cen
+    cen = cen / cen[2]
+    cv2.circle(image, center=(int(cen[0]), int(cen[1])), radius=10, color=[255, 255, 255], thickness=cv2.FILLED)
 
     cv2.imwrite("bbox" + str(idx) + "_" + str(test_set.temp) + ".png", image)
     test_set.temp = test_set.temp + 1
@@ -146,32 +140,32 @@ if __name__ == '__main__':
 
     sample_num = 0
 
-    data = data[sample_num:sample_num + 1]
-    gt = gt[sample_num:sample_num + 1]
-
     # forward + backward + optimize
-    vote_loss = loss.compute_vote_loss(gt[sample_num:sample_num + 1], l1_xyz[sample_num:sample_num + 1],
-                                       vote_xyz[sample_num:sample_num + 1], test_set)
-    box_loss = loss.compute_box_loss(gt[sample_num:sample_num + 1], corresponding_bbox[sample_num:sample_num + 1],
-                                     aggregation[sample_num:sample_num + 1], seed_inds[sample_num:sample_num + 1],
-                                     test_set)
-    print("vote loss: ", vote_loss)
-    print("box loss: ", box_loss)
-    loss1 = torch.sum(vote_loss + box_loss)
-    print("loss ", loss1)
+    # vote_loss = loss.compute_vote_loss(gt[sample_num:sample_num + 1], l1_xyz[sample_num:sample_num + 1],
+    #                                    vote_xyz[sample_num:sample_num + 1], test_set)
+    # box_loss = loss.compute_box_loss(gt[sample_num:sample_num + 1], corresponding_bbox[sample_num:sample_num + 1],
+    #                                  aggregation[sample_num:sample_num + 1], seed_inds[sample_num:sample_num + 1],
+    #                                  test_set)
+    # print("vote loss: ", vote_loss)
+    # print("box loss: ", box_loss)
+    # loss1 = torch.sum(vote_loss + box_loss)
+    # print("loss ", loss1)
 
     idx = int(gt[sample_num][0][11])
     s = int(test_set.image_idx_list[idx])
     data = data.cpu().numpy()
     aggregation = aggregation.cpu().detach().numpy()
-    l1_xyz = l1_xyz.cpu().detach().numpy()
-    vote_xyz = vote_xyz.cpu().detach().numpy()
-    image = cv2.imread(os.path.join(test_set.image_dir, '%06d.png' % s))
-    image = show_points(np.transpose(l1_xyz[sample_num]), vote_xyz[sample_num], idx, image, False)
-    cv2.imwrite("object_points_eval" + str(idx) + ".png", image)
-    draw_3dBox(aggregation[sample_num, :, 0], idx)
-    draw_3dBox(aggregation[sample_num, :, 1], idx)
-    draw_3dBox(aggregation[sample_num, :, 2], idx)
-    draw_3dBox(aggregation[sample_num, :, 3], idx)
-    draw_3dBox(aggregation[sample_num, :, 4], idx)
-    draw_3dBox(aggregation[sample_num, :, 5], idx)
+    gt = gt.cpu().detach().numpy()
+    # l1_xyz = l1_xyz.cpu().detach().numpy()
+    # vote_xyz = vote_xyz.cpu().detach().numpy()
+    # image = cv2.imread(os.path.join(test_set.image_dir, '%06d.png' % s))
+    # image = show_points(np.transpose(l1_xyz[sample_num]), vote_xyz[sample_num], idx, image, False)
+    # cv2.imwrite("object_points_eval" + str(idx) + ".png", image)
+    # draw_3dBox(aggregation[sample_num, :, 0], idx, gt[0][0])
+    # draw_3dBox(aggregation[sample_num, :, 1], idx, gt[0][0])
+    # draw_3dBox(aggregation[sample_num, :, 2], idx, gt[0][0])
+    # draw_3dBox(aggregation[sample_num, :, 3], idx, gt[0][0])
+    # draw_3dBox(aggregation[sample_num, :, 4], idx, gt[0][0])
+    # draw_3dBox(aggregation[sample_num, :, 5], idx, gt[0][0])
+    # draw_3dBox(aggregation[sample_num, :, 6], idx, gt[0][0])
+    # draw_3dBox(aggregation[sample_num, :, 7], idx, gt[0][0])

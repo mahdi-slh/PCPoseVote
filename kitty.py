@@ -298,13 +298,12 @@ class KittyDataset(torch_data.Dataset):
             num = num + 1
             gt = gtt[bboxes[seed_inds[i]]]
 
-            z = torch.from_numpy(self.get_rect_points(gt.numpy())).float().to(device)
-
             gt_extents = gt[4:7].to(device)
             gt_center = gt[7:10].to(device)
             gt_angle = gt[10].to(device)
 
-            loss = loss + torch.sum((gt_center - y_center[i]) ** 2) + torch.sum((gt_extents - y_size[i]) ** 2) + (gt_angle-angle[i])**2
+            loss = loss + torch.sum((gt_center - y_center[i]) ** 2)
+                   # + torch.sum((gt_extents - y_size[i]) ** 2) + (gt_angle-angle[i])**2
 
         return loss / num
 
