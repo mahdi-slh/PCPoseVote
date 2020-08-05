@@ -1,369 +1,505 @@
-import os
-import torch.utils.data as torch_data
-import numpy as np
-import cv2
+import torch.nn as nn
 import torch
-import open3d as o3d
-import random
+import numpy as np
+import torch.nn.functional as F
+import torch.utils.data as torch_data
+from kitty import KittyDataset
+import torch.optim as optim
+import loss
 from config import *
 
 
-class KittyDataset(torch_data.Dataset):
-    def __init__(self, root_dir, npoints=500, split='train', mode='TRAIN', random_select=True):
-        self.temp = 1
-        self.split = split
-        is_test = self.split == 'test'
-        self.imageset_dir = os.path.join(root_dir, 'training')
-        self.label_dir = os.path.join(self.imageset_dir, 'label_2')
-        self.image_dir = os.path.join(self.imageset_dir, 'image_2')
-        self.eval_dir = os.path.join(root_dir, 'evaluation')
-        self.calib_dir = os.path.join(self.imageset_dir, 'calib')
-        split_dir = os.path.join(root_dir, split + '.txt')
-        self.image_idx_list = [x.strip() for x in open(split_dir).readlines()]
-        self.num_sample = self.image_idx_list.__len__()
-        self.lidar_dir = os.path.join(self.imageset_dir, 'velodyne')
-        self.class_map = {'Car': 1, 'Van': 2, 'Truck': 3, 'Pedestrian': 4, 'Person_sitting': 5, 'Cyclist': 6, 'Tram': 7,
-                          'Misc': 8, 'DontCare': 9}
-        self.npoints = npoints
-        split_file = os.path.join(split_dir)
-        split_file = os.path.abspath(split_file)
-        self.image_idx_list = [x.strip() for x in open(split_file).readlines()]
-        self.classes = [1]
-        self.max_objects = 20
+class VotingModule(nn.Module):
+    def __init__(self, vote_factor, seed_feature_dim):
+        """ Votes generation from seed point features.
 
-        self.all_calib = {'P2': np.ndarray((self.__len__(), 3, 4)), 'R0': np.ndarray((self.__len__(), 4, 4)),
-                          'Tr': np.ndarray((self.__len__(), 4, 4))}
-
-        for index in range(self.__len__()):
-            self.read_calib(int(index))
-
-    def read_calib(self, idx):
-        s = int(self.image_idx_list[idx])
-        calib = open(os.path.join(self.calib_dir, '%06d.txt' % s))
-        all_lines = calib.readlines()
-        p2_line = all_lines[2]
-        p2_string = p2_line.split(" ")
-
-        P2 = np.ndarray((12,))
-        for i in range(12):
-            P2[i] = float(p2_string[i + 1])
-        P2 = P2.reshape((3, 4))
-        self.all_calib['P2'][idx] = P2
-
-        Tr_line = all_lines[5]
-        Tr_string = Tr_line.split(" ")
-        Tr = np.ndarray((12,))
-
-        for i in range(12):
-            Tr[i] = float(Tr_string[i + 1])
-        Tr = Tr.reshape((3, 4))
-        Tr_velo_to_cam = np.ndarray((4, 4))
-        Tr_velo_to_cam[0:3, :] = Tr
-        Tr_velo_to_cam[3, :] = [0.0, 0.0, 0.0, 1.0]
-        self.all_calib['Tr'][idx] = Tr_velo_to_cam
-
-        R0_rect = all_lines[4]
-        R0_string = R0_rect.split(" ")
-        temp = np.ndarray((9,))
-
-        for i in range(9):
-            temp[i] = float(R0_string[i + 1])
-        R = temp.reshape((3, 3))
-        R0 = np.ndarray((4, 4))
-        R0[0:3, 0:3] = R
-        R0[3][0:4] = [0, 0, 0, 1]
-        R0[0][3] = 0.0
-        R0[1][3] = 0.0
-        R0[2][3] = 0.0
-        self.all_calib['R0'][idx] = R0
-
-    def get_rect_points(self, gt):
-
-        R = np.ndarray((3, 3))
-        R[0] = [np.cos(gt[10]), 0, np.sin(gt[10])]
-        R[1] = [0, 1, 0]
-        R[2] = [-np.sin(gt[10]), 0, np.cos(gt[10])]
-
-        l = gt[6]
-        w = gt[5]
-        h = gt[4]
-
-        corners_3d = np.ndarray((3, 9))
-        corners_3d[0] = [l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2, 0]
-        corners_3d[1] = [0, 0, 0, 0, -h, -h, -h, -h, 0]
-        corners_3d[2] = [w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2, 0]
-
-        # corners_3d = R @ corners_3d
-
-        corners_3d[0, :] = corners_3d[0, :] + gt[7]
-        corners_3d[1, :] = corners_3d[1, :] + gt[8]
-        corners_3d[2, :] = corners_3d[2, :] + gt[9]
-
-        points_3d = np.ndarray((4, 9))
-        points_3d[0:3, :] = corners_3d
-        points_3d[3, :] = [1] * 9
-
-        return points_3d
-
-    def is_equal(self, x1, y1, z1, t1, x2, y2, z2, t2):
-        epsilon = 2
-        x1 = x1 / t1
-        y1 = y1 / t1
-        z1 = z1 / t1
-
-        x2 = x2 / t2
-        y2 = y2 / t2
-        z2 = z2 / t2
-
-        dist = (x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2
-
-        return dist < epsilon
-
-    def draw_3dBox(self, gt):
-        idx = int(gt[11])
-        s = int(self.image_idx_list[idx])
-        image = cv2.imread(os.path.join(self.image_dir, '%06d.png' % s))
-
-        points_3d = self.get_rect_points(gt)
-
-        P2, _, _ = self.all_calib['P2'][idx], self.all_calib['R0'][idx], self.all_calib['Tr'][idx]
-
-        pts_2D = np.matmul(P2, points_3d)
-        pts_2D[0, :] = pts_2D[0, :] / pts_2D[2, :]
-        pts_2D[1, :] = pts_2D[1, :] / pts_2D[2, :]
-
-        pts_2D = pts_2D[0:2, :]
-
-        for i in range(0, 8):
-            # cv2.line(image, (int(pts_2D[0][i]), int(pts_2D[1][i])), (int(pts_2D[0][i + 1]), int(pts_2D[1][i + 1])),
-            #          [255, 0, 0])
-            cv2.circle(image, center=(int(pts_2D[0][i]), int(pts_2D[1][i])), radius=5, color=[255, 0, 0])
-
-        cv2.imwrite("asas" + str(self.temp) + ".png", image)
-
-    def __len__(self):
-        return len(self.image_idx_list)
-
-    def __getitem__(self, item):
-        s = int(self.image_idx_list[item])
-        path = os.path.join(self.lidar_dir, '%06d.bin' % s)
-        label_path = os.path.join(self.label_dir, '%06d.txt' % s)
-        lines = [x.strip() for x in open(label_path).readlines()]
-        gt = -np.ones((self.max_objects, 12))
-        ind = -1
-        inds = []
-        for i in range(len(lines)):
-            r = lines[i].split(' ')
-            if self.class_map[r[0]] not in self.classes:
-                continue
-            ind = ind + 1
-            inds.append(ind)
-            gt[ind][0] = self.class_map[r[0]]  # class
-            gt[ind][1] = float(r[1])  # truncated
-            gt[ind][2] = float(r[2])  # occluded
-            gt[ind][3] = float(r[3])  # alpha
-            gt[ind][4] = float(r[8])  # h
-            gt[ind][5] = float(r[9])  # w
-            gt[ind][6] = float(r[10])  # l
-            gt[ind][7:10] = [float(r[11]), float(r[12]), float(r[13])]  # c
-            gt[ind][10] = float(r[14])  # ry
-            gt[ind][11] = item
-
-        t = np.fromfile(path, dtype=np.float32).reshape(-1, 4)
-        v = t[:, 0:3]
-        # p = o3d.geometry.PointCloud()
-        # p.points = o3d.utility.Vector3dVector(v)
-
-        # p = p.voxel_down_sample(voxel_size=0.1)
-
-        # t = np.asarray(p.points)
-
-        t, _ = self.object_points(v, gt[0])
-        t = v[t, :]
-
-        if t.shape[0] < 200:
-            return self.__getitem__(random.randint(0, self.__len__() - 1))
-
-        random_indices = np.random.choice(t.shape[0], self.npoints, replace=True)
-
-        t = t[random_indices, :3]
-
-        corresponding_bbox = np.ones((t.shape[0],)) * -1
-        for i in inds:
-            inside_points, _ = self.object_points(t, gt[i])
-            corresponding_bbox[inside_points] = i
-
-        t = t.astype(float)
-
-        return t, gt, corresponding_bbox
-
-    def dist(self, center: torch.Tensor, size: torch.Tensor, car_prob, gtt: torch.Tensor,
-             bboxes: torch.Tensor, angle: torch.Tensor, seed_inds: torch.Tensor):
-
-        center = center
-        bboxes = bboxes.long()
-
-        idx = int(gtt[0][11])
-        R0, Tr = self.all_calib['R0'][idx], self.all_calib['Tr'][idx]
-
-        R0 = torch.tensor(R0).double().to(device)
-        Tr = torch.tensor(Tr).double().to(device)
-
-        num = 0
-        loss = torch.zeros(1).to(device)
-        for proposal in range(center.shape[0]):
-            if bboxes[seed_inds[proposal]] == -1:
-                continue
-
-            num = num + 1
-
-            gt = gtt[bboxes[seed_inds[proposal]]]
-
-            l = size[proposal][2]
-            w = size[proposal][1]
-            h = size[proposal][0]
-
-            corners_3d = torch.zeros(3, 9).to(device)  # the last column contains center coordinates
-            corners_3d[0, :] = torch.tensor([l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2, 0]).to(
-                device) + \
-                               center[proposal][0]
-            corners_3d[1, :] = torch.tensor([0, 0, 0, 0, -h, -h, -h, -h, 0]).to(device) + center[proposal][1]
-            corners_3d[2, :] = torch.tensor([w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2, 0]).to(
-                device) + \
-                               center[proposal][2]
-
-            edges = torch.ones(4, 9).double().to(device)
-            edges[0:3, 0:9] = corners_3d
-
-            edges = R0 @ Tr @ edges
-
-            edges = edges / edges[3, :]
-            edges = edges[0:3, :]
-
-            pred_size = self.find_bbox_size(edges.transpose(0, 1)).to(device)
-
-            pred_center = edges[0:3, 8].to(device)
-
-            gt_extents = gt[4:7].to(device)
-            gt_center = gt[7:10].to(device)
-
-            gt_angle = gt[10].to(device)
-
-            loss = loss + torch.sum((gt_center - pred_center) ** 2) + \
-                   torch.sum((gt_extents - pred_size) ** 2) + (
-                           gt_angle - angle[proposal]) ** 2
-
-            # print("center loss: ", torch.sum((gt_center - pred_center) ** 2))
-            # print("size loss: ", torch.sum((gt_extents - pred_size) ** 2))
-            # print("angle loss: ", (gt_angle - angle[proposal]) ** 2)
-            # print("______________________________________________")
-
-        return loss / (num)
-
-    def find_bbox_size(self, points):
+        Args:
+            vote_facotr: int
+                number of votes generated from each seed point
+            seed_feature_dim: int
+                number of channels of seed point features
+            vote_feature_dim: int
+                number of channels of vote features
         """
-        :param points:
-             points = tensor[8,3]
-        :return:
-            return tensor size[h,w,l] -->
+        super().__init__()
+        self.vote_factor = vote_factor
+        self.in_dim = seed_feature_dim
+        self.out_dim = self.in_dim  # due to residual feature, in_dim has to be == out_dim
+        self.conv1 = torch.nn.Conv1d(self.in_dim, self.in_dim, 1)
+        self.conv2 = torch.nn.Conv1d(self.in_dim, self.in_dim, 1)
+        self.conv3 = torch.nn.Conv1d(self.in_dim, (3 + self.out_dim) * self.vote_factor, 1)
+        self.bn1 = torch.nn.BatchNorm1d(self.in_dim)
+        self.bn2 = torch.nn.BatchNorm1d(self.in_dim)
+
+    def forward(self, seed_xyz, seed_features):
+        """ Forward pass.
+
+        Arguments:
+            seed_xyz: (batch_size, num_seed, 3) Pytorch tensor
+            seed_features: (batch_size, feature_dim, num_seed) Pytorch tensor
+        Returns:
+            vote_xyz: (batch_size, num_seed*vote_factor, 3)
+            vote_features: (batch_size, vote_feature_dim, num_seed*vote_factor)
         """
-        l_max = torch.max(points[:, 0])
-        l_min = torch.min(points[:, 0])
+        batch_size = seed_xyz.shape[0]
+        num_seed = seed_xyz.shape[1]
+        num_vote = num_seed * self.vote_factor
+        net = F.relu(self.bn1(self.conv1(seed_features)))
+        net = F.relu(self.bn2(self.conv2(net)))
+        net = self.conv3(net)  # (batch_size, (3+out_dim)*vote_factor, num_seed)
 
-        h_max = torch.max(points[:, 1])
-        h_min = torch.min(points[:, 1])
+        net = net.transpose(2, 1).view(batch_size, num_seed, self.vote_factor, 3 + self.out_dim)
+        offset = net[:, :, :, 0:3]
+        vote_xyz = seed_xyz.unsqueeze(2) + offset
+        vote_xyz = vote_xyz.contiguous().view(batch_size, num_vote, 3)
 
-        w_max = torch.max(points[:, 2])
-        w_min = torch.min(points[:, 2])
+        residual_features = net[:, :, :, 3:]  # (batch_size, num_seed, vote_factor, out_dim)
+        vote_features = seed_features.transpose(2, 1).unsqueeze(2) + residual_features
+        vote_features = vote_features.contiguous().view(batch_size, num_vote, self.out_dim)
+        vote_features = vote_features.transpose(2, 1).contiguous()
 
-        return torch.tensor([h_max - h_min, w_max - w_min, l_max - l_min])
+        return vote_xyz, vote_features
 
-    def object_points(self, p, gt):
-        idx = int(gt[11])
-        s = int(self.image_idx_list[idx])
-        image = cv2.imread(os.path.join(self.image_dir, '%06d.png' % s))
 
-        R = np.zeros((3, 3))
-        R[0] = [np.cos(gt[10]), 0.0, np.sin(gt[10])]
-        R[1] = [0, 1, 0]
-        R[2] = [-np.sin(gt[10]), 0.0, np.cos(gt[10])]
+def index_points(points, idx):
+    """
 
-        center = np.copy(gt[7:10])
+    Input:
+        points: input points data, [B, N, C]
+        idx: sample index data, [B, S]z
+    Return:
+        new_points:, indexed points data, [B, S, C]
+    """
+    device = points.device
+    B = points.shape[0]
+    view_shape = list(idx.shape)
+    view_shape[1:] = [1] * (len(view_shape) - 1)
+    repeat_shape = list(idx.shape)
+    repeat_shape[0] = 1
+    batch_indices = torch.arange(B, dtype=torch.long).to(device).view(view_shape).repeat(repeat_shape)
+    new_points = points[batch_indices, idx, :]
+    return new_points
 
-        extents = np.ndarray((3,))
-        extents[0] = gt[6]
-        extents[1] = gt[5]
-        extents[2] = gt[4]
 
-        center[1] = center[1] - extents[1] / 2
+def pc_normalize(pc):
+    l = pc.shape[0]
+    centroid = np.mean(pc, axis=0)
+    pc = pc - centroid
+    m = np.max(np.sqrt(np.sum(pc ** 2, axis=1)))
+    pc = pc / m
+    return pc
 
-        P2, R0, Tr = self.all_calib['P2'][idx], self.all_calib['R0'][idx], self.all_calib['Tr'][idx]
 
-        center = center[0:3]
-        extents = extents[0:3]
+def square_distance(src, dst):
+    """
+    Calculate Euclid distance between each two points.
 
-        y = np.ones((p.shape[0], 4))
-        y[:, 0:3] = p
-        y = np.transpose(y)
+    src^T * dst = xn * xm + yn * ym + zn * zm；
+    sum(src^2, dim=-1) = xn*xn + yn*yn + zn*zn;
+    sum(dst^2, dim=-1) = xm*xm + ym*ym + zm*zm;
+    dist = (xn - xm)^2 + (yn - ym)^2 + (zn - zm)^2
+         = sum(src**2,dim=-1)+sum(dst**2,dim=-1)-2*src^T*dst
 
-        y = R0 @ Tr @ y
-        y = y / y[3, :]
-        y = np.transpose(y)
+    Input:
+        src: source points, [B, N, C]
+        dst: target points, [B, M, C]
+    Output:
+        dist: per-point square distance, [B, N, M]
+    """
+    B, N, _ = src.shape
+    _, M, _ = dst.shape
+    dist = -2 * torch.matmul(src, dst.permute(0, 2, 1))
+    dist += torch.sum(src ** 2, -1).view(B, N, 1)
+    dist += torch.sum(dst ** 2, -1).view(B, 1, M)
+    return dist
 
-        y = o3d.utility.Vector3dVector(y[:, 0:3])
 
-        bb = o3d.geometry.OrientedBoundingBox(center=center, R=R, extent=extents)
+def farthest_point_sample(xyz, npoint):
+    """
+    Input:
+        xyz: pointcloud data, [B, N, 3]
+        npoint: number of samples
+    Return:
+        centroids: sampled pointcloud index, [B, npoint]
+    """
+    device = xyz.device
+    B, N, C = xyz.shape
+    centroids = torch.zeros(B, npoint, dtype=torch.long).to(device)
+    distance = torch.ones(B, N).to(device) * 1e10
+    farthest = torch.randint(0, N, (B,), dtype=torch.long).to(device)
+    batch_indices = torch.arange(B, dtype=torch.long).to(device)
+    for i in range(npoint):
+        centroids[:, i] = farthest
+        centroid = xyz[batch_indices, farthest, :].view(B, 1, 3)
+        dist = torch.sum((xyz - centroid) ** 2, -1)
+        mask = dist < distance
+        distance[mask] = dist[mask]
+        farthest = torch.max(distance, -1)[1]
+    return centroids
 
-        inv = np.linalg.pinv(Tr) @ np.linalg.pinv(R0)
-        f = np.ndarray((4,))
-        f[0:3] = center
-        f[3] = 1
-        c = inv @ f
-        c = c / c[3]
 
-        return bb.get_point_indices_within_bounding_box(y), c[0:3]
+def query_ball_point(radius, nsample, xyz, new_xyz):
+    """
+    Input:
+        radius: local region radius
+        nsample: max sample number in local region
+        xyz: all points, [B, N, 3]
+        new_xyz: query points, [B, S, 3]
+    Return:
+        group_idx: grouped points index, [B, S, nsample]
+    """
+    device = xyz.device
+    B, N, C = xyz.shape
+    _, S, _ = new_xyz.shape
+    group_idx = torch.arange(N, dtype=torch.long).to(device).view(1, 1, N).repeat([B, S, 1])
+    sqrdists = square_distance(new_xyz, xyz)
+    group_idx[sqrdists > radius ** 2] = N
+    group_idx = group_idx.sort(dim=-1)[0][:, :, :nsample]
+    group_first = group_idx[:, :, 0].view(B, S, 1).repeat([1, 1, nsample])
+    mask = group_idx == N
+    group_idx[mask] = group_first[mask]
+    return group_idx
 
-        # for index in bb.get_point_indices_within_bounding_box(y):
-        #     s = abs(y[index] - y[bb.get_point_indices_within_bounding_box(y)[0]])
-        #     print((s[0] + s[1] + s[2]) / 3)
-        #     x = np.ones((4,))
-        #     x[0:3] = y[index]
-        #     z = P2 @ x
-        #     z = z / z[2]
-        #     cv2.circle(image, center=(int(z[0]), int(z[1])), radius=5, color=[0, 255, 255])
-        #
-        # cv2.imwrite("object_points" + str(idx) + ".png", image)
 
-        # return bb.get_point_indices_within_bounding_box(y), c[0:3]
+def sample_and_group(npoint, radius, nsample, xyz, points, seed_inds, returnfps=False):
+    """
+    Input:
+        npoint:
+        radius:
+        nsample:
+        xyz: input points position data, [B, N, 3]
+        points: input points data, [B, N, D]
+    Return:
+        new_xyz: sampled points position data, [B, npoint, nsample, 3]
+        new_points: sampled points data, [B, npoint, nsample, 3+D]
+    """
+    B, N, C = xyz.shape
+    S = npoint
+    fps_idx = farthest_point_sample(xyz, npoint)  # [B, npoint]
 
+    this_seed_inds = torch.ones(B, npoint, dtype=torch.long)
+    for i in range(B):
+        this_seed_inds[i] = seed_inds[i, fps_idx[i, :]]
+
+    torch.cuda.empty_cache()
+
+    new_xyz = index_points(xyz, fps_idx)
+    torch.cuda.empty_cache()
+    idx = query_ball_point(radius, nsample, xyz, new_xyz)
+    torch.cuda.empty_cache()
+    grouped_xyz = index_points(xyz, idx)  # [B, npoint, nsample, C]
+    torch.cuda.empty_cache()
+    grouped_xyz_norm = grouped_xyz - new_xyz.view(B, S, 1, C)
+    torch.cuda.empty_cache()
+
+    if points is not None:
+        grouped_points = index_points(points, idx)
+        new_points = torch.cat([grouped_xyz_norm, grouped_points], dim=-1)  # [B, npoint, nsample, C+D]
+    else:
+        new_points = grouped_xyz_norm
+    if returnfps:
+        return new_xyz, new_points, grouped_xyz, fps_idx, this_seed_inds
+    else:
+        return new_xyz, new_points, this_seed_inds
+
+
+def sample_and_group_all(xyz, points, seed_inds):
+    """
+    Input:
+        xyz: input points position data, [B, N, 3]
+        points: input points data, [B, N, D]
+    Return:
+        new_xyz: sampled points position data, [B, 1, 3]
+        new_points: sampled points data, [B, 1, N, 3+D]
+    """
+    device = xyz.device
+    B, N, C = xyz.shape
+    new_xyz = torch.zeros(B, 1, C).to(device)
+    grouped_xyz = xyz.view(B, 1, N, C)
+    if points is not None:
+        new_points = torch.cat([grouped_xyz, points.view(B, 1, N, -1)], dim=-1)
+    else:
+        new_points = grouped_xyz
+    return new_xyz, new_points, seed_inds
+
+
+class PointNetSetAbstraction(nn.Module):
+    def __init__(self, npoint, radius, nsample, in_channel, mlp, group_all, use_max=True):
+        super(PointNetSetAbstraction, self).__init__()
+        self.npoint = npoint
+        self.radius = radius
+        self.nsample = nsample
+        self.mlp_convs = nn.ModuleList()
+        self.mlp_bns = nn.ModuleList()
+        last_channel = in_channel
+        self.use_max = use_max
+        for out_channel in mlp:
+            self.mlp_convs.append(nn.Conv2d(last_channel, out_channel, 1))
+            self.mlp_bns.append(nn.BatchNorm2d(out_channel))
+            last_channel = out_channel
+        self.group_all = group_all
+
+    def forward(self, xyz, points, seed_inds):
+        """
+        Input:
+            xyz: input points position data, [B, C, N]
+            points: input points data, [B, D, N]
+        Return:
+            new_xyz: sampled points position data, [B, C, S]
+            new_points_concat: sample points feature data, [B, D', S]
+        """
+        B, C, N = xyz.shape
+
+        if points is not None:
+            _, D, _ = points.shape
+        else:
+            D = 0
+
+        xyz = xyz.permute(0, 2, 1)
+        if points is not None:
+            points = points.permute(0, 2, 1)
+
+        if self.group_all:
+            new_xyz, new_points, seed_inds = sample_and_group_all(xyz, points, seed_inds)
+        else:
+            new_xyz, new_points, seed_inds = sample_and_group(self.npoint, self.radius, self.nsample, xyz, points,
+                                                              seed_inds)
+        # new_xyz: sampled points position data, [B, npoint, C]
+        # new_points: sampled points data, [B, npoint, nsample, C+D]
+        new_points = new_points.permute(0, 3, 2, 1)  # [B, C+D, nsample,npoint]
+
+        for i, conv in enumerate(self.mlp_convs):
+            torch.cuda.empty_cache()
+            bn = self.mlp_bns[i]
+            new_points = (bn(conv(new_points)))
+            torch.cuda.empty_cache()
+            new_points = F.relu(new_points)
+
+        if not self.use_max:
+            return new_points[:, :C, :, :], new_points[:, C:C + D, :, :]
+
+        new_points = torch.max(new_points, 2)[0]
+        new_xyz = new_xyz.permute(0, 2, 1)
+        return new_xyz, new_points, seed_inds
+
+
+class PointNetFeaturePropagation(nn.Module):
+    def __init__(self, in_channel, mlp):
+        super(PointNetFeaturePropagation, self).__init__()
+        self.mlp_convs = nn.ModuleList()
+        self.mlp_bns = nn.ModuleList()
+        last_channel = in_channel
+        for out_channel in mlp:
+            self.mlp_convs.append(nn.Conv1d(last_channel, out_channel, 1))
+            self.mlp_bns.append(nn.BatchNorm1d(out_channel))
+            last_channel = out_channel
+
+    def forward(self, xyz1, xyz2, points1, points2):
+        """
+        Input:
+            xyz1: input points position data, [B, C, N]
+            xyz2: sampled input points position data, [B, C, S]
+            points1: input points data, [B, D, N]
+            points2: input points data, [B, D, S]
+        Return:
+            new_points: upsampled points data, [B, D', N]
+        """
+        xyz1 = xyz1.permute(0, 2, 1)
+        xyz2 = xyz2.permute(0, 2, 1)
+
+        points2 = points2.permute(0, 2, 1)
+        B, N, C = xyz1.shape
+        _, S, _ = xyz2.shape
+
+        if S == 1:
+            interpolated_points = points2.repeat(1, N, 1)
+        else:
+            dists = square_distance(xyz1, xyz2)
+            dists, idx = dists.sort(dim=-1)
+            dists, idx = dists[:, :, :3], idx[:, :, :3]  # [B, N, 3]
+
+            dist_recip = 1.0 / (dists + 1e-8)
+            norm = torch.sum(dist_recip, dim=2, keepdim=True)
+            weight = dist_recip / norm
+            interpolated_points = torch.sum(index_points(points2, idx) * weight.view(B, N, 3, 1), dim=2)
+
+        if points1 is not None:
+            points1 = points1.permute(0, 2, 1)
+            new_points = torch.cat([points1, interpolated_points], dim=-1)
+        else:
+            new_points = interpolated_points
+
+        new_points = new_points.permute(0, 2, 1)
+        for i, conv in enumerate(self.mlp_convs):
+            bn = self.mlp_bns[i]
+            new_points = F.relu(bn(conv(new_points)))
+        return new_points
+
+
+class ProposalModule(nn.Module):
+    def __init__(self, num_class, num_heading_bin, num_size_cluster, mean_size_arr, num_proposal, sampling, in_channel,
+                 seed_feat_dim=256):
+        super().__init__()
+
+        self.num_class = num_class
+        self.num_heading_bin = num_heading_bin
+        self.num_size_cluster = num_size_cluster
+        self.mean_size_arr = mean_size_arr
+        self.num_proposal = num_proposal
+        self.sampling = sampling
+        self.seed_feat_dim = seed_feat_dim
+        self.in_channel = in_channel
+
+        # Vote clustering
+        self.vote_aggregation = PointNetSetAbstraction(
+            npoint=self.num_proposal,
+            radius=0.3,
+            nsample=16,
+            in_channel=self.in_channel,
+            mlp=[self.in_channel, 128, 128, 128],
+            group_all=False,
+            use_max=True
+        )
+
+        # Object proposal/detection
+        # Objectness scores (2), center residual (3),
+        # heading class+residual (num_heading_bin*2), size class+residual(num_size_cluster*4)
+        self.conv1 = torch.nn.Conv1d(128, 128, 1)
+        self.conv2 = torch.nn.Conv1d(128, 128, 1)
+        self.conv3 = torch.nn.Conv1d(128, 1 + 3 + 3 + 1, 1)  # car prob + center loc + size + angle
+        self.bn1 = torch.nn.BatchNorm1d(128)
+        self.bn2 = torch.nn.BatchNorm1d(128)
+
+    def forward(self, xyz, features, seed_inds):
+        """
+        Args:
+            xyz: (B,3,K)
+            features: (B,C,K)
+        Returns:
+            scores: (B,num_proposal,2+3+NH*2+NS*4)
+        """
+
+        # Farthest point sampling (FPS) on votes
+        xyz, features, seed_inds = self.vote_aggregation(xyz, features, seed_inds)
+
+        # --------- PROPOSAL GENERATION ---------
+        net = F.relu(self.bn1(self.conv1(features)))
+        net = F.relu(self.bn2(self.conv2(net)))
+        net = self.conv3(net)  # (batch_size, 2+3+num_heading_bin*2+num_size_cluster*4, num_proposal)
+
+        return net, seed_inds
+
+
+class Votenet(nn.Module):
+    def __init__(self, num_class, num_heading_bin, num_size_cluster, mean_size_arr,
+                 input_feature_dim=0, num_proposal=num_proposal, vote_factor=1, sampling='vote_fps'):
+        self.num_class = num_class
+        self.num_heading_bin = num_heading_bin
+        self.num_size_cluster = num_size_cluster
+        self.mean_size_arr = mean_size_arr
+        # assert (mean_size_arr.shape[0] == self.num_size_cluster)
+        self.input_feature_dim = input_feature_dim
+        self.num_proposal = num_proposal
+        self.vote_factor = vote_factor
+        self.sampling = sampling
+
+        super(Votenet, self).__init__()
+        in_channel = 3
+
+        self.sa1 = PointNetSetAbstraction(npoint=256, radius=0.2, nsample=64, in_channel=in_channel,
+                                          mlp=[128, 128, 128], group_all=False)
+        self.sa2 = PointNetSetAbstraction(npoint=128, radius=0.4, nsample=64, in_channel=128 + 3,
+                                          mlp=[128, 128, 256], group_all=False)
+        self.sa3 = PointNetSetAbstraction(npoint=64, radius=0.8, nsample=64, in_channel=256 + 3,
+                                          mlp=[256, 256, 512], group_all=False)
+        self.fp3 = PointNetFeaturePropagation(in_channel=768, mlp=[256, 256])
+        self.fp2 = PointNetFeaturePropagation(in_channel=384, mlp=[256, seed_features_dim])
+        self.vgen = VotingModule(self.vote_factor, seed_features_dim)
+        self.pnet = ProposalModule(num_class, num_heading_bin, num_size_cluster,
+                                   mean_size_arr, num_proposal, sampling, in_channel=3+seed_features_dim)
+
+    def forward(self, xyz, seed_inds):
+        # Set Abstraction layers
+
+        xyz = xyz.permute(0, 2, 1)
+        B, C, N = xyz.shape
+
+        l0_xyz = xyz
+
+        l1_xyz, l1_points, seed_inds = self.sa1(l0_xyz, None, seed_inds)
+        torch.cuda.empty_cache()
+        l2_xyz, l2_points, _ = self.sa2(l1_xyz, l1_points, seed_inds)
+        torch.cuda.empty_cache()
+        l3_xyz, l3_points, _ = self.sa3(l2_xyz, l2_points, seed_inds)
+        torch.cuda.empty_cache()
+
+        # Feature Propagation layers
+
+        l2_points = self.fp3(l2_xyz, l3_xyz, l2_points, l3_points)
+        l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points)
+
+        vote_xyz, features = self.vgen(l1_xyz.permute(0, 2, 1), l1_points)
+
+        features_norm = torch.norm(features, p=2, dim=1)
+        features = features.div(features_norm.unsqueeze(1))
+
+        """
+            xyz.shape = [B,3,4096]
+            features.shape = [B,128,4096]
+        """
+
+        end_points, seed_inds = self.pnet(l1_xyz, features, seed_inds)
+
+        return l1_xyz, vote_xyz, end_points, seed_inds
 
 if __name__ == '__main__':
-    train_set = KittyDataset('F:\data_object_velodyne', split='test')
-    idx = 1345
 
-    points, gt, corresponding_bbox = train_set.__getitem__(idx)
+    torch.multiprocessing.freeze_support()
 
-    rect_points = train_set.get_rect_points(gt[0])
+    train_set = KittyDataset(PATH)
+    train_loader = torch_data.DataLoader(train_set, shuffle=True, batch_size=batch_size, num_workers=1)
+    model = Votenet(num_class=2, num_heading_bin=2, num_size_cluster=2, mean_size_arr=np.zeros((3, 1)),
+                    input_feature_dim=2)
+    model.to(device)
+    torch.multiprocessing.freeze_support()
+    optimizer = optim.SGD(model.parameters(), lr=0.0001, momentum=0.9)
 
-    idx = int(gt[0][11])
-    s = int(train_set.image_idx_list[idx])
-    image = cv2.imread(os.path.join(train_set.image_dir, '%06d.png' % s))
+    # checkpoint = torch.load(SAVE_PATH)
+    # model.load_state_dict(checkpoint['model_state_dict'])
+    # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    # epoch = checkpoint['epoch']
+    epoch = 0
 
-    P2, R0, Tr = train_set.all_calib['P2'][idx], train_set.all_calib['R0'][idx], train_set.all_calib['Tr'][idx]
-    lidar_points = np.linalg.pinv(Tr) @ np.linalg.pinv(R0) @ rect_points
+    for epoch in range(epoch+1, epoch + epoch_num + 1):
+        for i, data in enumerate(train_loader, 0):
+            print("epoch ", epoch, " step ", i + 1)
+            data, gt, corresponding_bbox = data
 
-    lidar_points = lidar_points / lidar_points[3, :]
 
-    size = torch.zeros(1, 3)
-    size[0] = train_set.find_bbox_size(torch.from_numpy(np.transpose(lidar_points[0:3, 0:8])).to(device))
+            data = data.to(torch.float32)
+            data = data.to(device)
+            gt = gt.to(device)
 
-    center1 = lidar_points[0, 8]
-    center2 = lidar_points[1, 8]
-    center3 = lidar_points[2, 8]
+            initial_inds = torch.unsqueeze(torch.arange(start=0, end=data.shape[1]), 0).repeat(data.shape[0], 1)
 
-    center = torch.tensor([[center1, center2, center3]]).to(device)
+            l1_xyz, vote_xyz, aggregation, seed_inds = model(data, initial_inds)
 
-    bboxes = torch.zeros(1).to(device)
-    seed_inds = torch.zeros(1).to(torch.long).to(device)
-    print(train_set.dist(center, size, 1, torch.from_numpy(gt).to(device), bboxes,
-                         torch.from_numpy(gt[0][10:11]).to(device), seed_inds))
+            optimizer.zero_grad()
+            # forward + backward + optimize
+            vote_loss = loss.compute_vote_loss(gt, l1_xyz, vote_xyz, train_set)
+            center_loss,size_loss,angle_loss = loss.compute_box_loss(gt, corresponding_bbox, aggregation, seed_inds, train_set)
+            print("vote loss: ", vote_loss)
+            print("center loss: ", center_loss)
+            print("size loss: ", size_loss)
+            print("angle loss: ", angle_loss)
+            loss1 = vote_loss + center_loss + size_loss + angle_loss
+            print("total loss ", loss1)
+            loss1.backward()
+            optimizer.step()
+
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': loss1,
+            }, SAVE_PATH)

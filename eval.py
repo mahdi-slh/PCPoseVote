@@ -73,57 +73,36 @@ def draw_3dBox(points, idx, gt):
     P2, R0, Tr = test_set.all_calib['P2'][idx], test_set.all_calib['R0'][idx], test_set.all_calib['Tr'][idx]
 
     center = points[1:4]
+    print(center)
     size = points[4:7]
 
-    c = np.ones((4,1))
-    s = np.ones((4,1))
+    l = size[2]
+    w = size[1]
+    h = size[0]
 
-    c[0:3,0] = center
-    s[0:3,0] = size
+    print(h,w,l)
 
-    center = R0 @ Tr @ c
-    center = center/center[3]
-    center = center[0:3,0]
+    corners_3d = np.ndarray((3, 9))  # the last column contains center coordinates
+    corners_3d[0, :] = np.array([l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2, 0]) + center[0]
+    corners_3d[1, :] = np.array([0, 0, 0, 0, -h, -h, -h, -h, 0]) + center[1]
+    corners_3d[2, :] = np.array([w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2, 0]) + center[2]
 
-    size = R0 @ Tr @ s
-    size = size / size[3]
-    size = size[0:3,0]
+    edges = np.ones((4, 9))
+    edges[0:3, 0:9] = corners_3d
 
+    edges = P2 @ R0 @ Tr @ edges
 
-    gt[7:10] = center
-    gt[4:7] = size
-    gt[10] = points[7]
+    edges = edges / edges[2, :]
+    edges = edges[0:2, :]
+    edges = np.transpose(edges)
 
+    for i in range(edges.shape[0]):
+        cv2.circle(image, center=(int(edges[i][0]), int(edges[i][1])), radius=10, color=[255, 255, 255])
 
-    bbox = test_set.get_rect_points(gt)
-
-    points = P2 @ bbox
-
-    points = points / points[2, :]
-    points = np.transpose(points)
-
-    for index in range(points.shape[0]):
-        z = points[index]
-        cv2.circle(image, center=(int(z[0]), int(z[1])), radius=10, color=[0, 0, 255])
-
-    centerrr = gt[7:10]
-    cen = np.ones((4, 1))
-    cen[0:3, 0] = centerrr
-    cen = P2 @ cen
-    cen = cen / cen[2]
-    cv2.circle(image, center=(int(cen[0]), int(cen[1])), radius=10, color=[255, 255, 255], thickness=cv2.FILLED)
-
-    cv2.imwrite("bbox" + str(idx) + "_" + str(test_set.temp) + ".png", image)
-    test_set.temp = test_set.temp + 1
-
-    # data = data.detach().numpy()
-    # aggregation = aggregation.detach().numpy()
-    # image = show_points(l1_xyz, vote_xyz[0], idx, image, False)
-    # cv2.imwrite("object_points_eval" + str(idx) + ".png", image)
-    # draw_3dBox(aggregation[0, :, 0], idx)
+    cv2.imwrite("abbas.png",image)
 
 
-torch.manual_seed(10)
+torch.manual_seed(45)
 np.random.seed(0)
 if __name__ == '__main__':
     model.to(device)
@@ -156,12 +135,14 @@ if __name__ == '__main__':
     data = data.cpu().numpy()
     aggregation = aggregation.cpu().detach().numpy()
     gt = gt.cpu().detach().numpy()
+
+
     # l1_xyz = l1_xyz.cpu().detach().numpy()
     # vote_xyz = vote_xyz.cpu().detach().numpy()
     # image = cv2.imread(os.path.join(test_set.image_dir, '%06d.png' % s))
     # image = show_points(np.transpose(l1_xyz[sample_num]), vote_xyz[sample_num], idx, image, False)
     # cv2.imwrite("object_points_eval" + str(idx) + ".png", image)
-    # draw_3dBox(aggregation[sample_num, :, 0], idx, gt[0][0])
+    draw_3dBox(aggregation[sample_num, :, 0], idx, gt[0][0])
     # draw_3dBox(aggregation[sample_num, :, 1], idx, gt[0][0])
     # draw_3dBox(aggregation[sample_num, :, 2], idx, gt[0][0])
     # draw_3dBox(aggregation[sample_num, :, 3], idx, gt[0][0])

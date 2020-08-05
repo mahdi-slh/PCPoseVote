@@ -4,20 +4,28 @@ import numpy as np
 from config import *
 
 
-def compute_box_loss(gt: torch.Tensor, corresponding_bbox: torch.Tensor, output: torch.Tensor,seed_inds: torch.Tensor,
+def compute_box_loss(gt: torch.Tensor, corresponding_bbox: torch.Tensor, output: torch.Tensor, seed_inds: torch.Tensor,
                      train_dataset: KittyDataset):
     B, _, M = output.shape
 
-    loss = torch.zeros(B, ).to(device)
+    total_center_loss = torch.zeros(B, ).to(device)
+    total_size_loss = torch.zeros(B, ).to(device)
+    total_angle_loss = torch.zeros(B, ).to(device)
+
     for i in range(B):
         car_prob = 1 / (1 + torch.exp(output[i, 0, :]))
         center = output[i, 1:4, :].transpose(1, 0)
         size = output[i, 4:7, :].transpose(1, 0)
-        angle = output[i,7]
+        angle = output[i, 7]
 
-        loss[i] = train_dataset.dist(center, size, car_prob, gt[i],corresponding_bbox[i],angle,seed_inds[i])
+        center_loss, size_loss, angle_loss = train_dataset.dist(center, size, car_prob, gt[i], corresponding_bbox[i],
+                                                                angle, seed_inds[i])
 
-    return torch.mean(loss)
+        total_center_loss[i] = total_center_loss[i] + center_loss
+        total_size_loss[i] = total_size_loss[i] + size_loss
+        total_angle_loss[i] = total_angle_loss[i] + angle_loss
+
+    return torch.mean(total_center_loss), torch.mean(total_size_loss) , torch.mean(total_angle_loss)
 
 
 def compute_vote_loss(gt: torch.Tensor, xyz: torch.Tensor, vote_xyz: torch.Tensor, train_dataset: KittyDataset):

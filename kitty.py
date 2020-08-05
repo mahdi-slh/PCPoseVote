@@ -78,6 +78,7 @@ class KittyDataset(torch_data.Dataset):
         self.all_calib['R0'][idx] = R0
 
     def get_rect_points(self, gt):
+
         R = np.ndarray((3, 3))
         R[0] = [np.cos(gt[10]), 0, np.sin(gt[10])]
         R[1] = [0, 1, 0]
@@ -87,20 +88,20 @@ class KittyDataset(torch_data.Dataset):
         w = gt[5]
         h = gt[4]
 
-        corners_3d = np.ndarray((3, 8))
-        corners_3d[0] = [l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2]
-        corners_3d[1] = [0, 0, 0, 0, -h, -h, -h, -h]
-        corners_3d[2] = [w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2]
+        corners_3d = np.ndarray((3, 9))
+        corners_3d[0] = [l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2, 0]
+        corners_3d[1] = [0, 0, 0, 0, -h, -h, -h, -h, 0]
+        corners_3d[2] = [w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2, 0]
 
-        corners_3d = R @ corners_3d
+        # corners_3d = R @ corners_3d
 
         corners_3d[0, :] = corners_3d[0, :] + gt[7]
         corners_3d[1, :] = corners_3d[1, :] + gt[8]
         corners_3d[2, :] = corners_3d[2, :] + gt[9]
 
-        points_3d = np.ndarray((4, 8))
+        points_3d = np.ndarray((4, 9))
         points_3d[0:3, :] = corners_3d
-        points_3d[3, :] = [1] * 8
+        points_3d[3, :] = [1] * 9
 
         return points_3d
 
@@ -118,70 +119,6 @@ class KittyDataset(torch_data.Dataset):
 
         return dist < epsilon
 
-    def show_points(self, points, gt):
-        points = points.cpu().numpy()
-        gt = gt.cpu().numpy()
-        idx = int(gt[11])
-        s = int(self.image_idx_list[idx])
-        image = cv2.imread(os.path.join(self.image_dir, '%06d.png' % s))
-
-        P2, R0, Tr = self.all_calib['P2'][idx], self.all_calib['R0'][idx], self.all_calib['Tr'][idx]
-
-        x = np.ones((points.shape[0], 4))
-        x[0:points.shape[0], 0:3] = points
-        y = np.transpose(x)
-        y = R0 @ Tr @ y
-        y = y / y[3, :]
-
-        z = self.get_rect_points(gt)
-
-        l = abs(z[0][0] - z[0][7])
-        h = abs(z[1][0] - z[1][7])
-        w = abs(z[2][0] - z[2][1])
-
-        center1 = (z[0][0] + z[0][7]) / 2
-        center2 = (z[1][0] + z[1][7]) / 2
-        center3 = (z[2][0] + z[2][1]) / 2
-
-        # all_points = np.ndarray((3, 0))
-
-        r = []
-        for i in range(points.shape[0]):
-            on_surface1 = abs(y[0][i] - center1) < l / 2
-            on_surface2 = abs(center2 - y[1][i]) < h / 2
-            on_surface3 = abs(y[2][i] - center3) < w / 2
-
-            on_surface1 = True
-            on_surface2 = True
-            on_surface3 = True
-
-            # flag = self.is_equal(points[i][0], points[i][1], points[i][2], 1, 46.78826479, -2.84346198, -2.13290362, 1)
-
-            if on_surface1 and on_surface2 and on_surface3:
-                r.append(i)
-
-        all_points = np.transpose(points[r])
-        points1 = np.ones((4, all_points.shape[1]))
-        points1[0:3, :] = all_points
-        all_points = P2 @ R0 @ Tr @ points1
-
-        for i in range(all_points.shape[1]):
-            cv2.circle(image,
-                       center=(int(all_points[0][i] / all_points[2][i]), int(all_points[1][i] / all_points[2][i])),
-                       radius=1, color=[0, 255, 255])
-        self.temp = self.temp + 1
-        cv2.imwrite("points" + str(self.temp) + ".png", image)
-
-        inv = np.linalg.pinv(Tr) @ np.linalg.pinv(R0)
-        f = np.ndarray((4, 1))
-        f[0, 0] = center1
-        f[1, 0] = center2
-        f[2, 0] = center3
-        f[3, 0] = 1
-        c = inv @ f
-        c = c / c[3]
-        return r, c[0:3, 0]
-
     def draw_3dBox(self, gt):
         idx = int(gt[11])
         s = int(self.image_idx_list[idx])
@@ -189,7 +126,7 @@ class KittyDataset(torch_data.Dataset):
 
         points_3d = self.get_rect_points(gt)
 
-        P2, _, _ = train_set.all_calib['P2'][idx], train_set.all_calib['R0'][idx], train_set.all_calib['Tr'][idx]
+        P2, _, _ = self.all_calib['P2'][idx], self.all_calib['R0'][idx], self.all_calib['Tr'][idx]
 
         pts_2D = np.matmul(P2, points_3d)
         pts_2D[0, :] = pts_2D[0, :] / pts_2D[2, :]
@@ -263,49 +200,82 @@ class KittyDataset(torch_data.Dataset):
     def dist(self, center: torch.Tensor, size: torch.Tensor, car_prob, gtt: torch.Tensor,
              bboxes: torch.Tensor, angle: torch.Tensor, seed_inds: torch.Tensor):
 
+        center = center
         bboxes = bboxes.long()
 
         idx = int(gtt[0][11])
-        P2, R0, Tr = self.all_calib['P2'][idx], self.all_calib['R0'][idx], self.all_calib['Tr'][idx]
+        R0, Tr = self.all_calib['R0'][idx], self.all_calib['Tr'][idx]
 
         R0 = torch.tensor(R0).double().to(device)
         Tr = torch.tensor(Tr).double().to(device)
 
-        y_center = torch.ones(center.shape[0], 4).double().to(device)
-        y_center[:, 0:3] = center.clone().to(device)
-        y_center = y_center.transpose(0, 1)
-        y_center = R0 @ Tr @ y_center
-        y_center = y_center / y_center[3, :]
-        y_center = y_center.transpose(0, 1)
-        y_center = y_center[:, 0:3]
-
-        y_size = torch.ones(center.shape[0], 4).double().to(device)
-        y_size[:, 0:3] = size.clone().to(device)
-        y_size = y_size.transpose(0, 1)
-        y_size = R0 @ Tr @ y_size
-        y_size = y_size / y_size[3, :]
-        y_size = y_size.transpose(0, 1)
-        y_size = y_size[:, 0:3]
-
-        loss = torch.zeros(1).to(device)
-
         num = 0
+        center_loss = torch.zeros(1).to(device)
+        angle_loss = torch.zeros(1).to(device)
+        size_loss = torch.zeros(1).to(device)
 
-        for i in range(center.shape[0]):
-            if bboxes[seed_inds[i]] == -1:
+        for proposal in range(center.shape[0]):
+            if bboxes[seed_inds[proposal]] == -1:
                 continue
 
             num = num + 1
-            gt = gtt[bboxes[seed_inds[i]]]
+
+            gt = gtt[bboxes[seed_inds[proposal]]]
+
+            l = size[proposal][2]
+            w = size[proposal][1]
+            h = size[proposal][0]
+
+            corners_3d = torch.zeros(3, 9).to(device)  # the last column contains center coordinates
+            zero_tensor = torch.tensor(0,dtype=torch.float).to(device)
+            corners_3d[0, :] = torch.stack(
+                [l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2, zero_tensor]).to(device)\
+                               + center[proposal][0]
+            corners_3d[1, :] = torch.stack([zero_tensor, zero_tensor, zero_tensor, zero_tensor, -h, -h, -h, -h, zero_tensor]).\
+                                   to(device) + center[proposal][1]
+            corners_3d[2, :] = torch.stack(
+                [w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2,zero_tensor]).to(device) + center[proposal][2]
+
+            edges = torch.ones(4, 9).double().to(device)
+            edges[0:3, 0:9] = corners_3d
+
+            edges = R0 @ Tr @ edges
+
+            edges = edges / edges[3, :]
+            edges = edges[0:3, :]
+
+            pred_size = self.find_bbox_size(edges.transpose(0, 1)).to(device)
+
+            pred_center = edges[0:3, 8].to(device)
 
             gt_extents = gt[4:7].to(device)
             gt_center = gt[7:10].to(device)
+
             gt_angle = gt[10].to(device)
 
-            loss = loss + torch.sum((gt_center - y_center[i]) ** 2)
-                   # + torch.sum((gt_extents - y_size[i]) ** 2) + (gt_angle-angle[i])**2
+            center_loss = center_loss + torch.sum((gt_center - pred_center) ** 2)
+            size_loss = size_loss + torch.sum((gt_extents - pred_size) ** 2)
+            angle_loss = angle_loss + (gt_angle - angle[proposal]) ** 2
 
-        return loss / num
+        return center_loss / num, size_loss / num, angle_loss / num
+
+    def find_bbox_size(self, points):
+        """
+        :param points:
+             points = tensor[8,3]
+        :return:
+            return tensor size[h,w,l] -->
+        """
+        l_max = torch.max(points[:, 0])
+        l_min = torch.min(points[:, 0])
+
+        h_max = torch.max(points[:, 1])
+        h_min = torch.min(points[:, 1])
+
+        w_max = torch.max(points[:, 2])
+        w_min = torch.min(points[:, 2])
+
+        return torch.stack([h_max - h_min, w_max - w_min, l_max - l_min])
 
     def object_points(self, p, gt):
         idx = int(gt[11])
@@ -368,16 +338,31 @@ class KittyDataset(torch_data.Dataset):
 
 if __name__ == '__main__':
     train_set = KittyDataset('F:\data_object_velodyne', split='test')
-    idx = 1231
+    idx = 1000
 
     points, gt, corresponding_bbox = train_set.__getitem__(idx)
-    # train_set.draw_3dBox(gt[1])
-    # train_set.show_points(points, gt[0])
-    # train_set.object_points(points, gt[0])
+
+    rect_points = train_set.get_rect_points(gt[0])
 
     idx = int(gt[0][11])
     s = int(train_set.image_idx_list[idx])
     image = cv2.imread(os.path.join(train_set.image_dir, '%06d.png' % s))
 
     P2, R0, Tr = train_set.all_calib['P2'][idx], train_set.all_calib['R0'][idx], train_set.all_calib['Tr'][idx]
+    lidar_points = np.linalg.pinv(Tr) @ np.linalg.pinv(R0) @ rect_points
 
+    lidar_points = lidar_points / lidar_points[3, :]
+
+    size = torch.zeros(1, 3).to(device)
+    size[0] = train_set.find_bbox_size(torch.from_numpy(np.transpose(lidar_points[0:3, 0:8])).to(device))
+
+    center1 = lidar_points[0, 8]
+    center2 = lidar_points[1, 8]
+    center3 = lidar_points[2, 8]
+
+    center = torch.tensor([[center1, center2, center3]]).to(device)
+
+    bboxes = torch.zeros(1).to(device)
+    seed_inds = torch.zeros(1).to(torch.long).to(device)
+    print(train_set.dist(center, size, 1, torch.from_numpy(gt).to(device), bboxes,
+                         torch.from_numpy(gt[0][10:11]).to(device), seed_inds))
