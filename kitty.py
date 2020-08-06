@@ -77,7 +77,7 @@ class KittyDataset(torch_data.Dataset):
         R0[2][3] = 0.0
         self.all_calib['R0'][idx] = R0
 
-    def get_rect_points(self, gt):
+    def get_box_points(self, gt):
 
         R = np.ndarray((3, 3))
         R[0] = [np.cos(gt[10]), 0, np.sin(gt[10])]
@@ -90,13 +90,13 @@ class KittyDataset(torch_data.Dataset):
 
         corners_3d = np.ndarray((3, 9))
         corners_3d[0] = [l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2, 0]
-        corners_3d[1] = [0, 0, 0, 0, -h, -h, -h, -h, 0]
+        corners_3d[1] = [h / 2, h / 2, h / 2, h / 2, -h / 2, -h / 2, -h / 2, -h / 2, 0]
         corners_3d[2] = [w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2, 0]
 
         # corners_3d = R @ corners_3d
 
         corners_3d[0, :] = corners_3d[0, :] + gt[7]
-        corners_3d[1, :] = corners_3d[1, :] + gt[8]
+        corners_3d[1, :] = corners_3d[1, :] + gt[8] - h / 2
         corners_3d[2, :] = corners_3d[2, :] + gt[9]
 
         points_3d = np.ndarray((4, 9))
@@ -124,7 +124,7 @@ class KittyDataset(torch_data.Dataset):
         s = int(self.image_idx_list[idx])
         image = cv2.imread(os.path.join(self.image_dir, '%06d.png' % s))
 
-        points_3d = self.get_rect_points(gt)
+        points_3d = self.get_box_points(gt)
 
         P2, _, _ = self.all_calib['P2'][idx], self.all_calib['R0'][idx], self.all_calib['Tr'][idx]
 
@@ -197,10 +197,8 @@ class KittyDataset(torch_data.Dataset):
 
         return t, gt, corresponding_bbox
 
-    def dist(self, center: torch.Tensor, size: torch.Tensor, car_prob, gtt: torch.Tensor,
-             bboxes: torch.Tensor, angle: torch.Tensor, seed_inds: torch.Tensor):
-
-        center = center
+    def box_dist(self, center: torch.Tensor, size: torch.Tensor, car_prob, gtt: torch.Tensor,
+                 bboxes: torch.Tensor, angle: torch.Tensor, seed_inds: torch.Tensor):
         bboxes = bboxes.long()
 
         idx = int(gtt[0][11])
@@ -227,14 +225,16 @@ class KittyDataset(torch_data.Dataset):
             h = size[proposal][0]
 
             corners_3d = torch.zeros(3, 9).to(device)  # the last column contains center coordinates
-            zero_tensor = torch.tensor(0,dtype=torch.float).to(device)
+            zero_tensor = torch.tensor(0, dtype=torch.float).to(device)
             corners_3d[0, :] = torch.stack(
-                [l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2, zero_tensor]).to(device)\
-                               + center[proposal][0]
-            corners_3d[1, :] = torch.stack([zero_tensor, zero_tensor, zero_tensor, zero_tensor, -h, -h, -h, -h, zero_tensor]).\
-                                   to(device) + center[proposal][1]
+                [l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2, zero_tensor]).to(device) + \
+                               center[proposal][0]
+            corners_3d[1, :] = torch.stack(
+                [h / 2, h / 2, h / 2, h / 2, -h / 2, -h / 2, -h / 2, -h / 2, zero_tensor]).to(device) + \
+                               center[proposal][1]
             corners_3d[2, :] = torch.stack(
-                [w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2,zero_tensor]).to(device) + center[proposal][2]
+                [w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2, zero_tensor]).to(device) + \
+                               center[proposal][2]
 
             edges = torch.ones(4, 9).double().to(device)
             edges[0:3, 0:9] = corners_3d
@@ -250,6 +250,7 @@ class KittyDataset(torch_data.Dataset):
 
             gt_extents = gt[4:7].to(device)
             gt_center = gt[7:10].to(device)
+            gt_center[1] = gt_center[1] - gt[4] / 2
 
             gt_angle = gt[10].to(device)
 
@@ -336,13 +337,14 @@ class KittyDataset(torch_data.Dataset):
         # return bb.get_point_indices_within_bounding_box(y), c[0:3]
 
 
+# for debugging purpose
 if __name__ == '__main__':
     train_set = KittyDataset('F:\data_object_velodyne', split='test')
-    idx = 1000
+    idx = 553
 
     points, gt, corresponding_bbox = train_set.__getitem__(idx)
 
-    rect_points = train_set.get_rect_points(gt[0])
+    rect_points = train_set.get_box_points(gt[0])
 
     idx = int(gt[0][11])
     s = int(train_set.image_idx_list[idx])
@@ -364,5 +366,5 @@ if __name__ == '__main__':
 
     bboxes = torch.zeros(1).to(device)
     seed_inds = torch.zeros(1).to(torch.long).to(device)
-    print(train_set.dist(center, size, 1, torch.from_numpy(gt).to(device), bboxes,
-                         torch.from_numpy(gt[0][10:11]).to(device), seed_inds))
+    print(train_set.box_dist(center, size, 1, torch.from_numpy(gt).to(device), bboxes,
+                             torch.from_numpy(gt[0][10:11]).to(device), seed_inds))

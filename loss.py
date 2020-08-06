@@ -18,8 +18,8 @@ def compute_box_loss(gt: torch.Tensor, corresponding_bbox: torch.Tensor, output:
         size = output[i, 4:7, :].transpose(1, 0)
         angle = output[i, 7]
 
-        center_loss, size_loss, angle_loss = train_dataset.dist(center, size, car_prob, gt[i], corresponding_bbox[i],
-                                                                angle, seed_inds[i])
+        center_loss, size_loss, angle_loss = train_dataset.box_dist(center, size, car_prob, gt[i], corresponding_bbox[i],
+                                                                    angle, seed_inds[i])
 
         total_center_loss[i] = total_center_loss[i] + center_loss
         total_size_loss[i] = total_size_loss[i] + size_loss

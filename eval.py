@@ -1,5 +1,5 @@
 import torch
-from main import Votenet
+from Network import Votenet
 import torch.utils.data as torch_data
 from kitty import KittyDataset
 import torch.optim as optim
@@ -11,7 +11,7 @@ from config import *
 
 torch.multiprocessing.freeze_support()
 
-test_set = KittyDataset(PATH, split='test')
+test_set = KittyDataset(PATH, split='train')
 test_loader = torch_data.DataLoader(test_set, shuffle=True, batch_size=batch_size, num_workers=1)
 model = Votenet(num_class=2, num_heading_bin=2, num_size_cluster=2, mean_size_arr=np.zeros((3, 1)),
                 input_feature_dim=2)
@@ -72,38 +72,32 @@ def draw_3dBox(points, idx, gt):
 
     P2, R0, Tr = test_set.all_calib['P2'][idx], test_set.all_calib['R0'][idx], test_set.all_calib['Tr'][idx]
 
-    center = points[1:4]
-    print(center)
-    size = points[4:7]
+    gtt = np.ndarray((12,))
+    gtt[4:7] = points[4:7]
+    gtt[7:10] = points[1:4]
+    gtt[10] = gt[10]
 
-    l = size[2]
-    w = size[1]
-    h = size[0]
-
-    print(h,w,l)
-
-    corners_3d = np.ndarray((3, 9))  # the last column contains center coordinates
-    corners_3d[0, :] = np.array([l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2, 0]) + center[0]
-    corners_3d[1, :] = np.array([0, 0, 0, 0, -h, -h, -h, -h, 0]) + center[1]
-    corners_3d[2, :] = np.array([w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2, 0]) + center[2]
-
-    edges = np.ones((4, 9))
-    edges[0:3, 0:9] = corners_3d
-
-    edges = P2 @ R0 @ Tr @ edges
+    edges = test_set.get_box_points(gt)
+    # edges = P2 @ R0 @ Tr @ edges
+    edges = P2 @ edges
 
     edges = edges / edges[2, :]
     edges = edges[0:2, :]
     edges = np.transpose(edges)
 
-    for i in range(edges.shape[0]):
-        cv2.circle(image, center=(int(edges[i][0]), int(edges[i][1])), radius=10, color=[255, 255, 255])
+    for i in range(9):
+        if i < 8:
+            cv2.circle(image, center=(int(edges[i][0]), int(edges[i][1])), radius=10, color=[255, 255, 255])
+        else:
+            cv2.circle(image, center=(int(edges[i][0]), int(edges[i][1])), radius=10, color=[0, 255, 255])
 
-    cv2.imwrite("abbas.png",image)
+    cv2.imwrite("abbas.png", image)
 
 
-torch.manual_seed(45)
-np.random.seed(0)
+# for debugging purpose
+
+torch.manual_seed(15)
+np.random.seed(5)
 if __name__ == '__main__':
     model.to(device)
     torch.multiprocessing.freeze_support()
@@ -135,7 +129,6 @@ if __name__ == '__main__':
     data = data.cpu().numpy()
     aggregation = aggregation.cpu().detach().numpy()
     gt = gt.cpu().detach().numpy()
-
 
     # l1_xyz = l1_xyz.cpu().detach().numpy()
     # vote_xyz = vote_xyz.cpu().detach().numpy()
