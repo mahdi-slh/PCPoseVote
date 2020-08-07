@@ -11,7 +11,7 @@ from config import *
 
 torch.multiprocessing.freeze_support()
 
-test_set = KittyDataset(PATH, split='train')
+test_set = KittyDataset(PATH, split='test')
 test_loader = torch_data.DataLoader(test_set, shuffle=True, batch_size=batch_size, num_workers=1)
 model = Votenet(num_class=2, num_heading_bin=2, num_size_cluster=2, mean_size_arr=np.zeros((3, 1)),
                 input_feature_dim=2)
@@ -75,10 +75,20 @@ def draw_3dBox(points, idx, gt):
     gtt = np.ndarray((12,))
     gtt[4:7] = points[4:7]
     gtt[7:10] = points[1:4]
-    gtt[10] = gt[10]
+    gtt[10] = 0
 
-    edges = test_set.get_box_points(gt)
-    # edges = P2 @ R0 @ Tr @ edges
+    edges = test_set.get_box_points(gtt,from_gt=False)
+
+    edges = R0 @ Tr @ edges
+
+    edges = edges/edges[3,:]
+
+    gtt[4:7] = test_set.find_bbox_size(torch.from_numpy(np.transpose(edges))).numpy()
+
+    gtt[7:10] = edges[0:3,8]
+    gtt[10] = gt[10]
+    edges = test_set.get_box_points(gtt,from_gt=False)
+    # edges = test_set.get_box_points(gt)
     edges = P2 @ edges
 
     edges = edges / edges[2, :]
@@ -96,7 +106,7 @@ def draw_3dBox(points, idx, gt):
 
 # for debugging purpose
 
-torch.manual_seed(15)
+torch.manual_seed(23)
 np.random.seed(5)
 if __name__ == '__main__':
     model.to(device)

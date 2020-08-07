@@ -19,11 +19,11 @@ if __name__ == '__main__':
     torch.multiprocessing.freeze_support()
     optimizer = optim.SGD(model.parameters(), lr=0.0001, momentum=0.9)
 
-    checkpoint = torch.load(SAVE_PATH)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    epoch = checkpoint['epoch']
-    # epoch = 0
+    # checkpoint = torch.load(SAVE_PATH)
+    # model.load_state_dict(checkpoint['model_state_dict'])
+    # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    # epoch = checkpoint['epoch']
+    epoch = 0
 
     for epoch in range(epoch + 1, epoch + epoch_num + 1):
         for i, data in enumerate(train_loader, 0):

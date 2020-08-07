@@ -77,26 +77,28 @@ class KittyDataset(torch_data.Dataset):
         R0[2][3] = 0.0
         self.all_calib['R0'][idx] = R0
 
-    def get_box_points(self, gt):
+    def get_box_points(self, gt, from_gt=True):
 
         R = np.ndarray((3, 3))
         R[0] = [np.cos(gt[10]), 0, np.sin(gt[10])]
         R[1] = [0, 1, 0]
         R[2] = [-np.sin(gt[10]), 0, np.cos(gt[10])]
 
-        l = gt[6]
-        w = gt[5]
-        h = gt[4]
+        l = np.copy(gt[6])
+        w = np.copy(gt[5])
+        h = np.copy(gt[4])
 
         corners_3d = np.ndarray((3, 9))
         corners_3d[0] = [l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2, 0]
         corners_3d[1] = [h / 2, h / 2, h / 2, h / 2, -h / 2, -h / 2, -h / 2, -h / 2, 0]
         corners_3d[2] = [w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2, 0]
 
-        # corners_3d = R @ corners_3d
+        corners_3d = R @ corners_3d
 
         corners_3d[0, :] = corners_3d[0, :] + gt[7]
-        corners_3d[1, :] = corners_3d[1, :] + gt[8] - h / 2
+        corners_3d[1, :] = corners_3d[1, :] + gt[8]
+        if from_gt:
+            corners_3d[1, :] = corners_3d[1, :] - h / 2
         corners_3d[2, :] = corners_3d[2, :] + gt[9]
 
         points_3d = np.ndarray((4, 9))
@@ -249,7 +251,7 @@ class KittyDataset(torch_data.Dataset):
             pred_center = edges[0:3, 8].to(device)
 
             gt_extents = gt[4:7].to(device)
-            gt_center = gt[7:10].to(device)
+            gt_center = gt[7:10].to(device).clone()
             gt_center[1] = gt_center[1] - gt[4] / 2
 
             gt_angle = gt[10].to(device)
