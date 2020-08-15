@@ -74,8 +74,7 @@ class ProposalModule(nn.Module):
             nsample=16,
             in_channel=self.in_channel,
             mlp=[self.in_channel, 128, 128, 128],
-            group_all=False,
-            use_max=True
+            group_all=False
         )
 
         self.conv1 = torch.nn.Conv1d(128, 128, 1)
@@ -85,19 +84,11 @@ class ProposalModule(nn.Module):
         self.bn2 = torch.nn.BatchNorm1d(128)
 
     def forward(self, xyz, features, seed_inds):
-        """
-        Args:
-            xyz: (B,3,K)
-            features: (B,C,K)
-        Returns:
-            scores: (B,num_proposal,2+3+NH*2+NS*4)
-        """
-
         # Farthest point sampling (FPS) on votes
-        xyz, features, seed_inds = self.vote_aggregation(xyz, features, seed_inds)
+        new_xyz, new_features, seed_inds = self.vote_aggregation(xyz, features, seed_inds)
 
         # --------- PROPOSAL GENERATION ---------
-        net = F.relu(self.bn1(self.conv1(features)))
+        net = F.relu(self.bn1(self.conv1(new_features)))
         net = F.relu(self.bn2(self.conv2(net)))
         net = self.conv3(net)  # (batch_size, 2+3+num_heading_bin*2+num_size_cluster*4, num_proposal)
 
@@ -120,12 +111,15 @@ class Votenet(nn.Module):
         in_channel = 3
 
         self.sa1 = PointNetSetAbstraction(npoint=256, radius=0.2, nsample=64, in_channel=in_channel,
-                                          mlp=[128, 128, 128], group_all=False)
+                                          mlp=[64, 64, 128], group_all=False)
         self.sa2 = PointNetSetAbstraction(npoint=128, radius=0.4, nsample=64, in_channel=128 + 3,
                                           mlp=[128, 128, 256], group_all=False)
         self.sa3 = PointNetSetAbstraction(npoint=64, radius=0.8, nsample=64, in_channel=256 + 3,
-                                          mlp=[256, 256, 512], group_all=False)
-        self.fp3 = PointNetFeaturePropagation(in_channel=768, mlp=[256, 256])
+                                          mlp=[128, 128, 256], group_all=False)
+        self.sa4 = PointNetSetAbstraction(npoint=64, radius=0.8, nsample=64, in_channel=256 + 3,
+                                          mlp=[128, 128, 256], group_all=False)
+        self.fp4 = PointNetFeaturePropagation(in_channel=512, mlp=[256, 256])
+        self.fp3 = PointNetFeaturePropagation(in_channel=512, mlp=[256, 256])
         self.fp2 = PointNetFeaturePropagation(in_channel=384, mlp=[256, seed_features_dim])
         self.vgen = VotingModule(self.vote_factor, seed_features_dim)
         self.pnet = ProposalModule(num_class, num_heading_bin, num_size_cluster,
@@ -135,32 +129,27 @@ class Votenet(nn.Module):
         # Set Abstraction layers
 
         xyz = xyz.permute(0, 2, 1)
-        B, C, N = xyz.shape
 
         l0_xyz = xyz
 
         l1_xyz, l1_points, seed_inds = self.sa1(l0_xyz, None, seed_inds)
-        torch.cuda.empty_cache()
         l2_xyz, l2_points, _ = self.sa2(l1_xyz, l1_points, seed_inds)
-        torch.cuda.empty_cache()
         l3_xyz, l3_points, _ = self.sa3(l2_xyz, l2_points, seed_inds)
-        torch.cuda.empty_cache()
+        l4_xyz, l4_points, _ = self.sa4(l3_xyz, l3_points, seed_inds)
 
         # Feature Propagation layers
 
+        l3_points = self.fp4(l3_xyz, l4_xyz, l3_points, l4_points)
         l2_points = self.fp3(l2_xyz, l3_xyz, l2_points, l3_points)
         l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points)
 
         vote_xyz, features = self.vgen(l1_xyz.permute(0, 2, 1), l1_points)
 
-        features_norm = torch.norm(features, p=2, dim=1)
-        features = features.div(features_norm.unsqueeze(1))
-
         """
-            xyz.shape = [B,3,4096]
-            features.shape = [B,128,4096]
+            xyz.shape = [B,3,l1_xyz.npoint]
+            features.shape = [B,seed_features_dim,l1_xyz.npoint]
         """
 
-        end_points, seed_inds = self.pnet(l1_xyz, features, seed_inds)
+        end_points, seed_inds = self.pnet(torch.transpose(vote_xyz, 1, 2), features, seed_inds)
 
         return l1_xyz, vote_xyz, end_points, seed_inds

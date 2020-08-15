@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
+
 def index_points(points, idx):
     """
 
@@ -21,15 +22,6 @@ def index_points(points, idx):
     batch_indices = torch.arange(B, dtype=torch.long).to(device).view(view_shape).repeat(repeat_shape)
     new_points = points[batch_indices, idx, :]
     return new_points
-
-
-def pc_normalize(pc):
-    l = pc.shape[0]
-    centroid = np.mean(pc, axis=0)
-    pc = pc - centroid
-    m = np.max(np.sqrt(np.sum(pc ** 2, axis=1)))
-    pc = pc / m
-    return pc
 
 
 def square_distance(src, dst):
@@ -68,6 +60,7 @@ def farthest_point_sample(xyz, npoint):
     B, N, C = xyz.shape
     centroids = torch.zeros(B, npoint, dtype=torch.long).to(device)
     distance = torch.ones(B, N).to(device) * 1e10
+    distance = distance.to(torch.float32)
     farthest = torch.randint(0, N, (B,), dtype=torch.long).to(device)
     batch_indices = torch.arange(B, dtype=torch.long).to(device)
     for i in range(npoint):
@@ -123,16 +116,12 @@ def sample_and_group(npoint, radius, nsample, xyz, points, seed_inds, returnfps=
     for i in range(B):
         this_seed_inds[i] = seed_inds[i, fps_idx[i, :]]
 
-    torch.cuda.empty_cache()
 
     new_xyz = index_points(xyz, fps_idx)
-    torch.cuda.empty_cache()
     idx = query_ball_point(radius, nsample, xyz, new_xyz)
-    torch.cuda.empty_cache()
     grouped_xyz = index_points(xyz, idx)  # [B, npoint, nsample, C]
-    torch.cuda.empty_cache()
+
     grouped_xyz_norm = grouped_xyz - new_xyz.view(B, S, 1, C)
-    torch.cuda.empty_cache()
 
     if points is not None:
         grouped_points = index_points(points, idx)
@@ -166,7 +155,7 @@ def sample_and_group_all(xyz, points, seed_inds):
 
 
 class PointNetSetAbstraction(nn.Module):
-    def __init__(self, npoint, radius, nsample, in_channel, mlp, group_all, use_max=True):
+    def __init__(self, npoint, radius, nsample, in_channel, mlp, group_all):
         super(PointNetSetAbstraction, self).__init__()
         self.npoint = npoint
         self.radius = radius
@@ -174,7 +163,6 @@ class PointNetSetAbstraction(nn.Module):
         self.mlp_convs = nn.ModuleList()
         self.mlp_bns = nn.ModuleList()
         last_channel = in_channel
-        self.use_max = use_max
         for out_channel in mlp:
             self.mlp_convs.append(nn.Conv2d(last_channel, out_channel, 1))
             self.mlp_bns.append(nn.BatchNorm2d(out_channel))
@@ -190,12 +178,6 @@ class PointNetSetAbstraction(nn.Module):
             new_xyz: sampled points position data, [B, C, S]
             new_points_concat: sample points feature data, [B, D', S]
         """
-        B, C, N = xyz.shape
-
-        if points is not None:
-            _, D, _ = points.shape
-        else:
-            D = 0
 
         xyz = xyz.permute(0, 2, 1)
         if points is not None:
@@ -206,19 +188,16 @@ class PointNetSetAbstraction(nn.Module):
         else:
             new_xyz, new_points, seed_inds = sample_and_group(self.npoint, self.radius, self.nsample, xyz, points,
                                                               seed_inds)
+
+
+        new_points = new_points.permute(0, 3, 2, 1)
+
         # new_xyz: sampled points position data, [B, npoint, C]
-        # new_points: sampled points data, [B, npoint, nsample, C+D]
-        new_points = new_points.permute(0, 3, 2, 1)  # [B, C+D, nsample,npoint]
+        # new_points: sampled points data, [B, C+D, nsample , npoint]
 
         for i, conv in enumerate(self.mlp_convs):
-            torch.cuda.empty_cache()
             bn = self.mlp_bns[i]
-            new_points = (bn(conv(new_points)))
-            torch.cuda.empty_cache()
-            new_points = F.relu(new_points)
-
-        if not self.use_max:
-            return new_points[:, :C, :, :], new_points[:, C:C + D, :, :]
+            new_points = F.relu(bn(conv(new_points)))
 
         new_points = torch.max(new_points, 2)[0]
         new_xyz = new_xyz.permute(0, 2, 1)
@@ -276,4 +255,3 @@ class PointNetFeaturePropagation(nn.Module):
             bn = self.mlp_bns[i]
             new_points = F.relu(bn(conv(new_points)))
         return new_points
-

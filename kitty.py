@@ -7,6 +7,16 @@ import open3d as o3d
 import random
 from config import *
 
+np.random.seed(0)
+
+
+def pc_normalize(pc):
+    centroid = np.mean(pc, axis=0)
+    pc = pc - centroid
+    m = np.max(np.sqrt(np.sum(pc ** 2, axis=1)))
+    pc = pc / m
+    return centroid, m, pc
+
 
 class KittyDataset(torch_data.Dataset):
     def __init__(self, root_dir, npoints=500, split='train', mode='TRAIN', random_select=True):
@@ -107,42 +117,6 @@ class KittyDataset(torch_data.Dataset):
 
         return points_3d
 
-    def is_equal(self, x1, y1, z1, t1, x2, y2, z2, t2):
-        epsilon = 2
-        x1 = x1 / t1
-        y1 = y1 / t1
-        z1 = z1 / t1
-
-        x2 = x2 / t2
-        y2 = y2 / t2
-        z2 = z2 / t2
-
-        dist = (x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2
-
-        return dist < epsilon
-
-    def draw_3dBox(self, gt):
-        idx = int(gt[11])
-        s = int(self.image_idx_list[idx])
-        image = cv2.imread(os.path.join(self.image_dir, '%06d.png' % s))
-
-        points_3d = self.get_box_points(gt)
-
-        P2, _, _ = self.all_calib['P2'][idx], self.all_calib['R0'][idx], self.all_calib['Tr'][idx]
-
-        pts_2D = np.matmul(P2, points_3d)
-        pts_2D[0, :] = pts_2D[0, :] / pts_2D[2, :]
-        pts_2D[1, :] = pts_2D[1, :] / pts_2D[2, :]
-
-        pts_2D = pts_2D[0:2, :]
-
-        for i in range(0, 8):
-            # cv2.line(image, (int(pts_2D[0][i]), int(pts_2D[1][i])), (int(pts_2D[0][i + 1]), int(pts_2D[1][i + 1])),
-            #          [255, 0, 0])
-            cv2.circle(image, center=(int(pts_2D[0][i]), int(pts_2D[1][i])), radius=5, color=[255, 0, 0])
-
-        cv2.imwrite("asas" + str(self.temp) + ".png", image)
-
     def __len__(self):
         return len(self.image_idx_list)
 
@@ -150,6 +124,10 @@ class KittyDataset(torch_data.Dataset):
         s = int(self.image_idx_list[item])
         path = os.path.join(self.lidar_dir, '%06d.bin' % s)
         label_path = os.path.join(self.label_dir, '%06d.txt' % s)
+        t = np.fromfile(path, dtype=np.float32).reshape(-1, 4)
+        t = t.astype('float32')
+        v = t[:, 0:3]
+
         lines = [x.strip() for x in open(label_path).readlines()]
         gt = -np.ones((self.max_objects, 12))
         ind = -1
@@ -167,12 +145,10 @@ class KittyDataset(torch_data.Dataset):
             gt[ind][4] = float(r[8])  # h
             gt[ind][5] = float(r[9])  # w
             gt[ind][6] = float(r[10])  # l
-            gt[ind][7:10] = [float(r[11]), float(r[12]), float(r[13])]  # c
+            gt[ind][7:10] = (np.array([float(r[11]), float(r[12]), float(r[13])]))  # c
             gt[ind][10] = float(r[14])  # ry
             gt[ind][11] = item
 
-        t = np.fromfile(path, dtype=np.float32).reshape(-1, 4)
-        v = t[:, 0:3]
         # p = o3d.geometry.PointCloud()
         # p.points = o3d.utility.Vector3dVector(v)
 
@@ -182,12 +158,10 @@ class KittyDataset(torch_data.Dataset):
 
         t, _ = self.object_points(v, gt[0])
         t = v[t, :]
-
         if t.shape[0] < 200:
             return self.__getitem__(random.randint(0, self.__len__() - 1))
 
         random_indices = np.random.choice(t.shape[0], self.npoints, replace=True)
-
         t = t[random_indices, :3]
 
         corresponding_bbox = np.ones((t.shape[0],)) * -1
@@ -195,72 +169,13 @@ class KittyDataset(torch_data.Dataset):
             inside_points, _ = self.object_points(t, gt[i])
             corresponding_bbox[inside_points] = i
 
+        # random_indices = np.random.choice(v.shape[0], 200, replace=True)
+
+        centroid, m, t = pc_normalize(t)
         t = t.astype(float)
 
-        return t, gt, corresponding_bbox
-
-    def box_dist(self, center: torch.Tensor, size: torch.Tensor, car_prob, gtt: torch.Tensor,
-                 bboxes: torch.Tensor, angle: torch.Tensor, seed_inds: torch.Tensor):
-        bboxes = bboxes.long()
-
-        idx = int(gtt[0][11])
-        R0, Tr = self.all_calib['R0'][idx], self.all_calib['Tr'][idx]
-
-        R0 = torch.tensor(R0).double().to(device)
-        Tr = torch.tensor(Tr).double().to(device)
-
-        num = 0
-        center_loss = torch.zeros(1).to(device)
-        angle_loss = torch.zeros(1).to(device)
-        size_loss = torch.zeros(1).to(device)
-
-        for proposal in range(center.shape[0]):
-            if bboxes[seed_inds[proposal]] == -1:
-                continue
-
-            num = num + 1
-
-            gt = gtt[bboxes[seed_inds[proposal]]]
-
-            l = size[proposal][2]
-            w = size[proposal][1]
-            h = size[proposal][0]
-
-            corners_3d = torch.zeros(3, 9).to(device)  # the last column contains center coordinates
-            zero_tensor = torch.tensor(0, dtype=torch.float).to(device)
-            corners_3d[0, :] = torch.stack(
-                [l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2, zero_tensor]).to(device) + \
-                               center[proposal][0]
-            corners_3d[1, :] = torch.stack(
-                [h / 2, h / 2, h / 2, h / 2, -h / 2, -h / 2, -h / 2, -h / 2, zero_tensor]).to(device) + \
-                               center[proposal][1]
-            corners_3d[2, :] = torch.stack(
-                [w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2, zero_tensor]).to(device) + \
-                               center[proposal][2]
-
-            edges = torch.ones(4, 9).double().to(device)
-            edges[0:3, 0:9] = corners_3d
-
-            edges = R0 @ Tr @ edges
-
-            edges = edges / edges[3, :]
-            edges = edges[0:3, :]
-
-            pred_size = self.find_bbox_size(edges.transpose(0, 1)).to(device)
-
-            pred_center = edges[0:3, 8].to(device)
-
-            gt_extents = gt[4:7].to(device)
-            gt_center = gt[7:10].to(device).clone()
-            gt_center[1] = gt_center[1] - gt[4] / 2
-
-            gt_angle = gt[10].to(device)
-
-            center_loss = center_loss + torch.sum((gt_center - pred_center) ** 2)
-            size_loss = size_loss + torch.sum((gt_extents - pred_size) ** 2)
-            angle_loss = angle_loss + (gt_angle - angle[proposal]) ** 2
-
-        return center_loss / num, size_loss / num, angle_loss / num
+        return t, gt, corresponding_bbox, centroid, m
+        # return t, gt, corresponding_bbox
 
     def find_bbox_size(self, points):
         """
@@ -283,7 +198,7 @@ class KittyDataset(torch_data.Dataset):
     def object_points(self, p, gt):
         idx = int(gt[11])
         s = int(self.image_idx_list[idx])
-        image = cv2.imread(os.path.join(self.image_dir, '%06d.png' % s))
+        # image = cv2.imread(os.path.join(self.image_dir, '%06d.png' % s))
 
         R = np.zeros((3, 3))
         R[0] = [np.cos(gt[10]), 0.0, np.sin(gt[10])]
@@ -327,7 +242,7 @@ class KittyDataset(torch_data.Dataset):
 
         # for index in bb.get_point_indices_within_bounding_box(y):
         #     s = abs(y[index] - y[bb.get_point_indices_within_bounding_box(y)[0]])
-        #     print((s[0] + s[1] + s[2]) / 3)
+        #     # print((s[0] + s[1] + s[2]) / 3)
         #     x = np.ones((4,))
         #     x[0:3] = y[index]
         #     z = P2 @ x
@@ -335,16 +250,19 @@ class KittyDataset(torch_data.Dataset):
         #     cv2.circle(image, center=(int(z[0]), int(z[1])), radius=5, color=[0, 255, 255])
         #
         # cv2.imwrite("object_points" + str(idx) + ".png", image)
-
+        #
         # return bb.get_point_indices_within_bounding_box(y), c[0:3]
 
 
 # for debugging purpose
 if __name__ == '__main__':
     train_set = KittyDataset('F:\data_object_velodyne', split='test')
-    idx = 553
-
+    idx = 641
     points, gt, corresponding_bbox = train_set.__getitem__(idx)
+    exit(1)
+
+    train_set.object_points(points, gt[0])
+    exit(1)
 
     rect_points = train_set.get_box_points(gt[0])
 
@@ -368,5 +286,6 @@ if __name__ == '__main__':
 
     bboxes = torch.zeros(1).to(device)
     seed_inds = torch.zeros(1).to(torch.long).to(device)
-    print(train_set.box_dist(center, size, 1, torch.from_numpy(gt).to(device), bboxes,
-                             torch.from_numpy(gt[0][10:11]).to(device), seed_inds))
+
+    # print(loss.box_dist(train_set,center, size, 1, torch.from_numpy(gt).to(device), bboxes,
+    #                          torch.from_numpy(gt[0][10:11]).to(device), seed_inds))
