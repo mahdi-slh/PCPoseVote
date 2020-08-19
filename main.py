@@ -1,4 +1,3 @@
-import torch
 import numpy as np
 import torch.utils.data as torch_data
 from kitty import KittyDataset
@@ -28,7 +27,7 @@ if __name__ == '__main__':
     # epoch = checkpoint['epoch']
     epoch = 0
 
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.9)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=1)
     center_loss_values = []
     vote_loss_values = []
     size_loss_values = []
@@ -62,7 +61,6 @@ if __name__ == '__main__':
             plt.plot(total_loss_values, 'm', label='Total Loss')
             plt.legend(framealpha=1, frameon=True)
 
-
         for i, data in tqdm(enumerate(train_loader, 0)):
             optimizer.zero_grad()
             print("epoch ", epoch, " step ", i + 1)
@@ -79,37 +77,29 @@ if __name__ == '__main__':
 
             initial_inds = torch.unsqueeze(torch.arange(start=0, end=data.shape[1]), 0).repeat(data.shape[0], 1)
 
-            l1_xyz, vote_xyz, aggregation, seed_inds = model(data, initial_inds)
+            l1_xyz, vote_xyz, result, seed_inds = model(data, initial_inds)
 
             l1_xyz = l1_xyz * m[:, None, None]
             vote_xyz = vote_xyz * m[:, None, None]
-            aggregation[:, 1:7, :] = aggregation[:, 1:7, :] * m[:, None, None]
+            result[:, 1:7, :] = result[:, 1:7, :] * m[:, None, None]
             l1_xyz = l1_xyz + centroid[:, :, None]
             vote_xyz = vote_xyz + centroid[:, None, :]
-            aggregation[:, 1:4, :] = aggregation[:, 1:4, :] + centroid[:, :, None]
-
-            # forward + backward + optimize
-            end_point_locs = torch.zeros(batch_size, num_proposal, 3).to(device)
-
-            velodyne_center = torch.mean(data, dim=1)
-            velodyne_center = velodyne_center[:, None, :].repeat(1,num_proposal,1)
-            for i in range(batch_size):
-                # end_point_locs[i] = data[i, seed_inds[i]]
-                end_point_locs[i] = velodyne_center[i]
+            result[:, 1:4, :] = result[:, 1:4, :] + centroid[:, :, None]
 
             vote_loss = loss.compute_vote_loss(gt, l1_xyz, vote_xyz, train_set)
 
-            center_loss, size_loss, angle_loss = loss.compute_box_loss(gt, corresponding_bbox, aggregation, seed_inds,
-                                                                       train_set, end_point_locs)
+            center_loss, size_loss, car_prob_loss = loss.compute_box_loss(gt, corresponding_bbox, result,
+                                                                          seed_inds, train_set)
             print("vote loss: ", vote_loss)
             print("center loss: ", center_loss)
             print("size loss: ", size_loss)
+            # print("car prob loss: ", car_prob_loss)
 
             vote_loss_values.append(vote_loss)
             center_loss_values.append(center_loss)
             size_loss_values.append(size_loss)
             # print("angle loss: ", angle_loss)
-            loss1 = vote_loss + size_loss + center_loss
+            loss1 = vote_loss + center_loss + size_loss
 
             total_loss_values.append(loss1)
 
@@ -119,9 +109,9 @@ if __name__ == '__main__':
             optimizer.step()
 
             scheduler.step()
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': loss1,
-            }, SAVE_PATH)
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': loss1,
+        }, SAVE_PATH)

@@ -189,7 +189,6 @@ class PointNetSetAbstraction(nn.Module):
             new_xyz, new_points, seed_inds = sample_and_group(self.npoint, self.radius, self.nsample, xyz, points,
                                                               seed_inds)
 
-
         new_points = new_points.permute(0, 3, 2, 1)
 
         # new_xyz: sampled points position data, [B, npoint, C]

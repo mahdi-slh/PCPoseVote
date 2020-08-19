@@ -19,7 +19,7 @@ def pc_normalize(pc):
 
 
 class KittyDataset(torch_data.Dataset):
-    def __init__(self, root_dir, npoints=500, split='train', mode='TRAIN', random_select=True):
+    def __init__(self, root_dir, npoints=data_points, split='train', mode='TRAIN', random_select=True):
         self.temp = 1
         self.split = split
         is_test = self.split == 'test'
@@ -142,9 +142,9 @@ class KittyDataset(torch_data.Dataset):
             gt[ind][1] = float(r[1])  # truncated
             gt[ind][2] = float(r[2])  # occluded
             gt[ind][3] = float(r[3])  # alpha
-            gt[ind][4] = float(r[8])  # h
+            gt[ind][4] = float(r[8])   # h
             gt[ind][5] = float(r[9])  # w
-            gt[ind][6] = float(r[10])  # l
+            gt[ind][6] = float(r[10]) # l
             gt[ind][7:10] = (np.array([float(r[11]), float(r[12]), float(r[13])]))  # c
             gt[ind][10] = float(r[14])  # ry
             gt[ind][11] = item
@@ -156,7 +156,7 @@ class KittyDataset(torch_data.Dataset):
 
         # t = np.asarray(p.points)
 
-        t, _ = self.object_points(v, gt[0])
+        t, _ = self.object_points(v, gt[0], box_size=1)
         t = v[t, :]
         if t.shape[0] < 200:
             return self.__getitem__(random.randint(0, self.__len__() - 1))
@@ -168,8 +168,6 @@ class KittyDataset(torch_data.Dataset):
         for i in inds:
             inside_points, _ = self.object_points(t, gt[i])
             corresponding_bbox[inside_points] = i
-
-        # random_indices = np.random.choice(v.shape[0], 200, replace=True)
 
         centroid, m, t = pc_normalize(t)
         t = t.astype(float)
@@ -195,7 +193,7 @@ class KittyDataset(torch_data.Dataset):
 
         return torch.stack([h_max - h_min, w_max - w_min, l_max - l_min])
 
-    def object_points(self, p, gt):
+    def object_points(self, p, gt, box_size=1.0):
         idx = int(gt[11])
         s = int(self.image_idx_list[idx])
         # image = cv2.imread(os.path.join(self.image_dir, '%06d.png' % s))
@@ -229,7 +227,7 @@ class KittyDataset(torch_data.Dataset):
 
         y = o3d.utility.Vector3dVector(y[:, 0:3])
 
-        bb = o3d.geometry.OrientedBoundingBox(center=center, R=R, extent=extents)
+        bb = o3d.geometry.OrientedBoundingBox(center=center, R=R, extent=extents * box_size)
 
         inv = np.linalg.pinv(Tr) @ np.linalg.pinv(R0)
         f = np.ndarray((4,))
@@ -258,7 +256,8 @@ class KittyDataset(torch_data.Dataset):
 if __name__ == '__main__':
     train_set = KittyDataset('F:\data_object_velodyne', split='test')
     idx = 641
-    points, gt, corresponding_bbox = train_set.__getitem__(idx)
+    points, gt, corresponding_bbox, center, m = train_set.__getitem__(idx)
+    print(train_set.find_bbox_size(points))
     exit(1)
 
     train_set.object_points(points, gt[0])
