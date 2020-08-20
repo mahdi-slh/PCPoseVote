@@ -8,6 +8,7 @@ import loss
 from config import *
 from tqdm import tqdm
 from matplotlib import pyplot as plt
+import open3d as o3d
 
 torch.multiprocessing.freeze_support()
 
@@ -21,6 +22,82 @@ checkpoint = torch.load(SAVE_PATH)
 model.load_state_dict(checkpoint['model_state_dict'])
 epoch = checkpoint['epoch']
 loss1 = checkpoint['loss']
+
+
+def visualize_pointcloud():
+    idx = 541
+    s = int(test_set.image_idx_list[idx])
+    label_path = os.path.join(test_set.label_dir, '%06d.txt' % s)
+
+    _, R0, Tr = test_set.all_calib['P2'][idx], test_set.all_calib['R0'][idx], test_set.all_calib['Tr'][idx]
+
+    path = os.path.join(test_set.lidar_dir, '%06d.bin' % s)
+    t = np.fromfile(path, dtype=np.float32).reshape(-1, 4)
+    t = t.astype('float32')
+    v = np.ones((t.shape[0], 4))
+    v[:, 0:3] = t[:, 0:3]
+
+    v = R0 @ Tr @ np.transpose(v)
+    v = v / v[3]
+    v = np.transpose(v[0:3, :])
+
+    lines = [x.strip() for x in open(label_path).readlines()]
+    gt = -np.ones((test_set.max_objects, 12))
+    ind = -1
+    inds = []
+    for i in range(len(lines)):
+        r = lines[i].split(' ')
+        if test_set.class_map[r[0]] not in test_set.classes:
+            continue
+        ind = ind + 1
+        inds.append(ind)
+        gt[ind][0] = test_set.class_map[r[0]]  # class
+        gt[ind][1] = float(r[1])  # truncated
+        gt[ind][2] = float(r[2])  # occluded
+        gt[ind][3] = float(r[3])  # alpha
+        gt[ind][4] = float(r[8])  # h
+        gt[ind][5] = float(r[9])  # w
+        gt[ind][6] = float(r[10])  # l
+        gt[ind][7:10] = (np.array([float(r[11]), float(r[12]), float(r[13])]))  # c
+        gt[ind][10] = float(r[14])  # ry
+        gt[ind][11] = idx
+
+    gt = gt[1]
+    R = np.zeros((3, 3))
+    R[0] = [np.cos(gt[10]), 0.0, np.sin(gt[10])]
+    R[1] = [0, 1, 0]
+    R[2] = [-np.sin(gt[10]), 0.0, np.cos(gt[10])]
+    bb = o3d.geometry.OrientedBoundingBox(center=gt[7:10], R=R, extent=gt[4:7])
+
+    data, gt, corresponding_bbox, centroid, s = test_set.__getitem__(541)
+    m = np.ndarray((1,))
+    m[0] = s
+
+    data = torch.from_numpy(data).to(device)
+    gt = torch.from_numpy(gt).to(device)
+    centroid = torch.from_numpy(centroid).to(device)
+    m = torch.from_numpy(m).to(device)
+
+    initial_inds = torch.unsqueeze(torch.arange(start=0, end=data.shape[1]), 0).repeat(data.shape[0], 1)
+
+    l1_xyz, vote_xyz, result, seed_inds = model(data, initial_inds)
+
+    l1_xyz = l1_xyz * m[:, None, None]
+    vote_xyz = vote_xyz * m[:, None, None]
+    result[:, 1:7, :] = result[:, 1:7, :] * m[:, None, None]
+    l1_xyz = l1_xyz + centroid[:, :, None]
+    vote_xyz = vote_xyz + centroid[:, None, :]
+    result[:, 1:4, :] = result[:, 1:4, :] + centroid[:, :, None]
+
+    print(result)
+
+    p = o3d.geometry.PointCloud()
+    p.points = o3d.utility.Vector3dVector(v)
+    vis = o3d.visualization.Visualizer()
+    vis.create_window()
+    vis.add_geometry(p)
+    vis.add_geometry(bb)
+    vis.run()
 
 
 def show_points(points, votes, idx, image, line):
@@ -135,6 +212,8 @@ np.random.seed(5)
 if __name__ == '__main__':
     model.to(device)
     torch.multiprocessing.freeze_support()
+    visualize_pointcloud()
+
     center_loss_values = []
     vote_loss_values = []
     size_loss_values = []
@@ -195,3 +274,4 @@ if __name__ == '__main__':
     plt.plot(size_loss_values, 'g', label='Size Loss')
     plt.plot(total_loss_values, 'm', label='Total Loss')
     plt.legend(framealpha=1, frameon=True)
+    plt.savefig("test_loss_plot.png")

@@ -159,6 +159,7 @@ class KittyDataset(torch_data.Dataset):
         t, _ = self.object_points(v, gt[0], box_size=1)
         t = v[t, :]
         if t.shape[0] < 200:
+            print("oh!")
             return self.__getitem__(random.randint(0, self.__len__() - 1))
 
         random_indices = np.random.choice(t.shape[0], self.npoints, replace=True)
@@ -195,7 +196,7 @@ class KittyDataset(torch_data.Dataset):
 
     def object_points(self, p, gt, box_size=1.0):
         idx = int(gt[11])
-        s = int(self.image_idx_list[idx])
+        # s = int(self.image_idx_list[idx])
         # image = cv2.imread(os.path.join(self.image_dir, '%06d.png' % s))
 
         R = np.zeros((3, 3))
