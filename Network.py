@@ -2,7 +2,6 @@ import torch.nn as nn
 from config import *
 from Pointnet2 import *
 
-
 class VotingModule(nn.Module):
   def __init__(self, vote_factor, seed_feature_dim):
     """ Votes generation from seed point features.
@@ -69,7 +68,7 @@ class ProposalModule(nn.Module):
     # Vote clustering
     self.vote_aggregation = PointNetSetAbstraction(
       npoint=self.num_proposal,
-      radius=0.3,
+      radius=0.6,
       nsample=64,
       in_channel=self.in_channel,
       mlp=[self.in_channel, 128, 128, 128],
@@ -91,7 +90,7 @@ class ProposalModule(nn.Module):
     net = F.relu(self.bn2(self.conv2(net)))
     net = self.conv3(net)  # (batch_size, 2+3+num_heading_bin*2+num_size_cluster*4, num_proposal)
     net[:, 1:4, :] = new_xyz + net[:,1:4,:]
-    return net, seed_inds
+    return new_xyz, net, seed_inds
 
 
 class Votenet(nn.Module):
@@ -130,7 +129,7 @@ class Votenet(nn.Module):
     xyz = xyz.permute(0, 2, 1)
 
     l0_xyz = xyz
-    l1_xyz, l1_points, seed_inds = self.sa1(l0_xyz, None, seed_inds)
+    l1_xyz, l1_points, vote_inds = self.sa1(l0_xyz, None, seed_inds)
     l2_xyz, l2_points, _ = self.sa2(l1_xyz, l1_points, seed_inds)
     l3_xyz, l3_points, _ = self.sa3(l2_xyz, l2_points, seed_inds)
     l4_xyz, l4_points, _ = self.sa4(l3_xyz, l3_points, seed_inds)
@@ -149,5 +148,5 @@ class Votenet(nn.Module):
         features.shape = [B,seed_features_dim,l1_xyz.npoint]
     """
 
-    end_points, seed_inds = self.pnet(torch.transpose(vote_xyz, 1, 2), features, seed_inds)
-    return l1_xyz, vote_xyz, end_points, seed_inds
+    aggregated_votes, end_points, seed_inds = self.pnet(torch.transpose(vote_xyz, 1, 2), features, vote_inds)
+    return aggregated_votes, vote_xyz, end_points, seed_inds,vote_inds

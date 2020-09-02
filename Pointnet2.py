@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-
+from config import *
 
 def index_points(points, idx):
     """
@@ -112,7 +112,7 @@ def sample_and_group(npoint, radius, nsample, xyz, points, seed_inds, returnfps=
     S = npoint
     fps_idx = farthest_point_sample(xyz, npoint)  # [B, npoint]
 
-    this_seed_inds = torch.ones(B, npoint, dtype=torch.long)
+    this_seed_inds = torch.ones(B, npoint, dtype=torch.long).to(device)
     for i in range(B):
         this_seed_inds[i] = seed_inds[i, fps_idx[i, :]]
 

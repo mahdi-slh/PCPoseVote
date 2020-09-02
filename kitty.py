@@ -7,8 +7,6 @@ import open3d as o3d
 import random
 from config import *
 
-np.random.seed(0)
-
 
 def pc_normalize(pc):
     centroid = np.mean(pc, axis=0)
@@ -121,6 +119,8 @@ class KittyDataset(torch_data.Dataset):
         return len(self.image_idx_list)
 
     def __getitem__(self, item):
+        R0, Tr = self.all_calib['R0'][item], self.all_calib['Tr'][item]
+
         s = int(self.image_idx_list[item])
         path = os.path.join(self.lidar_dir, '%06d.bin' % s)
         label_path = os.path.join(self.label_dir, '%06d.txt' % s)
@@ -129,7 +129,7 @@ class KittyDataset(torch_data.Dataset):
         v = t[:, 0:3]
 
         lines = [x.strip() for x in open(label_path).readlines()]
-        gt = -np.ones((self.max_objects, 12))
+        gt = -np.ones((self.max_objects, 15)) * 1000
         ind = -1
         inds = []
         for i in range(len(lines)):
@@ -142,9 +142,9 @@ class KittyDataset(torch_data.Dataset):
             gt[ind][1] = float(r[1])  # truncated
             gt[ind][2] = float(r[2])  # occluded
             gt[ind][3] = float(r[3])  # alpha
-            gt[ind][4] = float(r[8])   # h
+            gt[ind][4] = float(r[8])  # h
             gt[ind][5] = float(r[9])  # w
-            gt[ind][6] = float(r[10]) # l
+            gt[ind][6] = float(r[10])  # l
             gt[ind][7:10] = (np.array([float(r[11]), float(r[12]), float(r[13])]))  # c
             gt[ind][10] = float(r[14])  # ry
             gt[ind][11] = item
@@ -155,26 +155,37 @@ class KittyDataset(torch_data.Dataset):
         # p = p.voxel_down_sample(voxel_size=0.1)
 
         # t = np.asarray(p.points)
-
-        t, _ = self.object_points(v, gt[0], box_size=1)
+        if ind == -1:
+            return self.__getitem__(np.random.randint(low=0, high=self.__len__()))
+        rnd = np.random.randint(low=0, high=ind + 1)
+        t, _ = self.object_points(v, gt[rnd], random=True)
         t = v[t, :]
-        if t.shape[0] < 200:
-            print("oh!")
-            return self.__getitem__(random.randint(0, self.__len__() - 1))
+
+        if t.shape[0] < 500:
+            return self.__getitem__(np.random.randint(low=0, high=self.__len__()))
 
         random_indices = np.random.choice(t.shape[0], self.npoints, replace=True)
         t = t[random_indices, :3]
 
-        corresponding_bbox = np.ones((t.shape[0],)) * -1
+        corresponding_bbox = np.ones((t.shape[0],)) * -1000
         for i in inds:
             inside_points, _ = self.object_points(t, gt[i])
             corresponding_bbox[inside_points] = i
 
+        gt[:ind + 1, 12:15] = gt[:ind + 1, 7:10]
+        gt[:ind + 1, 13] = gt[:ind + 1, 13] - gt[:ind + 1, 5] / 2
+
+        inv = np.linalg.pinv(Tr) @ np.linalg.pinv(R0)
+        f = np.ones((4, ind + 1))
+        f[0:3, :] = np.transpose(gt[:ind+1, 12:15])
+        c = inv @ f
+        c = c / c[3]
+        gt[:ind+1, 12:15] = np.transpose(c[0:3, :])
+
         centroid, m, t = pc_normalize(t)
         t = t.astype(float)
 
-        return t, gt, corresponding_bbox, centroid, m
-        # return t, gt, corresponding_bbox
+        return t, gt, corresponding_bbox, centroid, m, rnd
 
     def find_bbox_size(self, points):
         """
@@ -194,7 +205,7 @@ class KittyDataset(torch_data.Dataset):
 
         return torch.stack([h_max - h_min, w_max - w_min, l_max - l_min])
 
-    def object_points(self, p, gt, box_size=1.0):
+    def object_points(self, p, gt, random=False):
         idx = int(gt[11])
         # s = int(self.image_idx_list[idx])
         # image = cv2.imread(os.path.join(self.image_dir, '%06d.png' % s))
@@ -228,7 +239,11 @@ class KittyDataset(torch_data.Dataset):
 
         y = o3d.utility.Vector3dVector(y[:, 0:3])
 
-        bb = o3d.geometry.OrientedBoundingBox(center=center, R=R, extent=extents * box_size)
+        if not random:
+            bb = o3d.geometry.OrientedBoundingBox(center=center, R=R, extent=extents)
+        else:
+            bb = o3d.geometry.OrientedBoundingBox(center=center + np.random.rand(3), R=R,
+                                                  extent=np.flipud(sample_box_size))
 
         inv = np.linalg.pinv(Tr) @ np.linalg.pinv(R0)
         f = np.ndarray((4,))
