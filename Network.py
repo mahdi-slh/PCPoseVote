@@ -77,7 +77,7 @@ class ProposalModule(nn.Module):
 
     self.conv1 = torch.nn.Conv1d(128, 128, 1)
     self.conv2 = torch.nn.Conv1d(128, 128, 1)
-    self.conv3 = torch.nn.Conv1d(128, 1 + 3 + 3 + 1, 1)  # car prob + center loc + size + angle
+    self.conv3 = torch.nn.Conv1d(128, 1 + 3 + 3 + 2, 1)  # none + center loc + size + class scores
     self.bn1 = torch.nn.BatchNorm1d(128)
     self.bn2 = torch.nn.BatchNorm1d(128)
 

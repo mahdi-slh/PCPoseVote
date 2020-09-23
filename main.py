@@ -45,8 +45,7 @@ if __name__ == '__main__':
             optimizer.zero_grad()
             print("epoch ", epoch, " step ", i + 1)
 
-            data, gt, corresponding_bbox, centroid, m,_ = data
-
+            data, gt, corresponding_bbox, centroid, m,_,_ = data
             data = data.to(torch.float32)
             data = data.to(device)
             gt = gt.to(device)
@@ -56,8 +55,6 @@ if __name__ == '__main__':
 
             initial_inds = torch.unsqueeze(torch.arange(start=0, end=data.shape[1]), 0).repeat(data.shape[0], 1).to(
                 device)
-
-
 
             aggregated_xyz, vote_xyz, result, seed_inds, vote_inds = model(data, initial_inds)
 

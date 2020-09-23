@@ -6,7 +6,7 @@ import torch
 import open3d as o3d
 import random
 from config import *
-
+from pointcloud_partitioning import pc_partition
 
 def pc_normalize(pc):
     centroid = np.mean(pc, axis=0)
@@ -155,23 +155,33 @@ class KittyDataset(torch_data.Dataset):
         # p = p.voxel_down_sample(voxel_size=0.1)
 
         # t = np.asarray(p.points)
+        contain_car = np.random.choice([False, True], size=(1,), p=[0.5, 0.5])
         if ind == -1:
             return self.__getitem__(np.random.randint(low=0, high=self.__len__()))
         rnd = np.random.randint(low=0, high=ind + 1)
-        t, _ = self.object_points(v, gt[rnd], random=True)
-        t = v[t, :]
+        # t, box_data = self.object_points(v, gt[rnd], random=True,contain_car=contain_car[0])
+        x = np.bitwise_and(v[:, 0] < 100, v[:, 0] > 0)
+        x = np.bitwise_and(x, v[:, 2] < 10)
+        x = np.bitwise_and(x, v[:, 2] > -10)
+        v = v[x]
 
-        if t.shape[0] < 500:
-            return self.__getitem__(np.random.randint(low=0, high=self.__len__()))
+        _,regions = pc_partition(torch.from_numpy(v[np.newaxis,:,:]).to('cpu'))
+        regions = regions[0].cpu().detach().numpy()
+        random_slice = np.random.choice(farthest_point_num,(farthest_point_num,),replace=False)
 
-        random_indices = np.random.choice(t.shape[0], self.npoints, replace=True)
-        t = t[random_indices, :3]
+        for i in range(random_slice.shape[0]):
+            if np.unique(regions[random_slice[i]]).shape[0] < 400:
+                continue
+            t = v[regions[random_slice[i]], :]
+            break
+
+        # random_indices = np.random.choice(t.shape[0], self.npoints, replace=True)
+        # t = t[random_indices, :3]
 
         corresponding_bbox = np.ones((t.shape[0],)) * -1000
         for i in inds:
             inside_points, _ = self.object_points(t, gt[i])
             corresponding_bbox[inside_points] = i
-
         gt[:ind + 1, 12:15] = gt[:ind + 1, 7:10]
         gt[:ind + 1, 13] = gt[:ind + 1, 13] - gt[:ind + 1, 5] / 2
 
@@ -185,7 +195,7 @@ class KittyDataset(torch_data.Dataset):
         centroid, m, t = pc_normalize(t)
         t = t.astype(float)
 
-        return t, gt, corresponding_bbox, centroid, m, rnd
+        return t, gt, corresponding_bbox, centroid, m, rnd, 1
 
     def find_bbox_size(self, points):
         """
@@ -205,7 +215,7 @@ class KittyDataset(torch_data.Dataset):
 
         return torch.stack([h_max - h_min, w_max - w_min, l_max - l_min])
 
-    def object_points(self, p, gt, random=False):
+    def object_points(self, p, gt, random=False, contain_car = True):
         idx = int(gt[11])
         # s = int(self.image_idx_list[idx])
         # image = cv2.imread(os.path.join(self.image_dir, '%06d.png' % s))
@@ -215,19 +225,23 @@ class KittyDataset(torch_data.Dataset):
         R[1] = [0, 1, 0]
         R[2] = [-np.sin(gt[10]), 0.0, np.cos(gt[10])]
 
-        center = np.copy(gt[7:10])
+        box_data = np.zeros(6,) # 0:3 --> center , 3:6 --> width
+        if contain_car:
+            center = np.copy(gt[7:10])
+            extents = np.ndarray((3,))
+            extents[0] = gt[6]
+            extents[1] = gt[5]
+            extents[2] = gt[4]
+            center[1] = center[1] - extents[1] / 2
+            box_data[3:6] = np.copy(extents)
+        else:
+            center = np.random.normal([-5,0,15],2,(3,))
 
-        extents = np.ndarray((3,))
-        extents[0] = gt[6]
-        extents[1] = gt[5]
-        extents[2] = gt[4]
 
-        center[1] = center[1] - extents[1] / 2
+
+        box_data[0:3] = np.copy(center)
 
         P2, R0, Tr = self.all_calib['P2'][idx], self.all_calib['R0'][idx], self.all_calib['Tr'][idx]
-
-        center = center[0:3]
-        extents = extents[0:3]
 
         y = np.ones((p.shape[0], 4))
         y[:, 0:3] = p
@@ -242,17 +256,15 @@ class KittyDataset(torch_data.Dataset):
         if not random:
             bb = o3d.geometry.OrientedBoundingBox(center=center, R=R, extent=extents)
         else:
-            bb = o3d.geometry.OrientedBoundingBox(center=center + np.random.rand(3), R=R,
-                                                  extent=np.flipud(sample_box_size))
+            # center = center + np.random.rand(3)*random_shift_interval
+            # box_data[0:3] = np.copy(center)
+            extents = np.flipud(sample_box_size)
+            box_data[3:6] = np.copy(extents)
+            bb = o3d.geometry.OrientedBoundingBox(center=center , R=np.eye(3),
+                                                  extent=extents)
 
-        inv = np.linalg.pinv(Tr) @ np.linalg.pinv(R0)
-        f = np.ndarray((4,))
-        f[0:3] = center
-        f[3] = 1
-        c = inv @ f
-        c = c / c[3]
 
-        return bb.get_point_indices_within_bounding_box(y), c[0:3]
+        return bb.get_point_indices_within_bounding_box(y),box_data
 
         # for index in bb.get_point_indices_within_bounding_box(y):
         #     s = abs(y[index] - y[bb.get_point_indices_within_bounding_box(y)[0]])
