@@ -14,7 +14,7 @@ from nn_distance import nn_distance
 
 torch.multiprocessing.freeze_support()
 
-test_set = KittyDataset(PATH, split='test')
+test_set = KittyDataset(PATH, split='train')
 test_loader = torch_data.DataLoader(test_set, shuffle=True, batch_size=batch_size, num_workers=1)
 model = Votenet(num_class=2, num_heading_bin=2, num_size_cluster=2, mean_size_arr=np.zeros((3, 1)),
                 input_feature_dim=2)

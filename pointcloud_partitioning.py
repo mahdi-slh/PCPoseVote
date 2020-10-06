@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from config import *
+import open3d as o3d
 
 def square_distance(src, dst):
     """
@@ -72,10 +73,29 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
     return group_idx
 
 def pc_partition(pc):
+    """
+    :param pc: [1,number of points,3]
+    :return:
+    """
     fps =  farthest_point_sample(pc,farthest_point_num)
     fps_points = torch.gather(pc, 1, fps[:,:,None].repeat(1,1,3))
-    npoint = 10000
-    regions =  query_ball_point(7,npoint,pc,fps_points)
-    rand_inds = torch.randint(0,npoint,(regions.shape[0],regions.shape[1],data_points)).to('cpu')
-    regions = torch.gather(regions,2,rand_inds)
-    return fps_points,regions
+    regions = torch.zeros(1,farthest_point_num,data_points).long()
+    y = o3d.utility.Vector3dVector(pc[0])
+    bad_regions = []
+    for i in range(farthest_point_num):
+        center = fps_points[0,i,:]
+        extents = np.flipud(sample_box_size)
+        bb = o3d.geometry.OrientedBoundingBox(center=center , R=np.eye(3),
+                                              extent=extents)
+        print(len(np.asarray(bb.get_point_indices_within_bounding_box(y))))
+        if len(np.asarray(bb.get_point_indices_within_bounding_box(y))) < minimum_number_of_points:
+            bad_regions.append(i)
+        indices = np.random.choice(np.asarray(bb.get_point_indices_within_bounding_box(y)),data_points)
+        regions[0,i] = torch.from_numpy(indices).to(device).to(torch.long)
+
+
+    # npoint = 6000
+    # regions =  query_ball_point(7,npoint,pc,fps_points)
+    # rand_inds = torch.randint(0,npoint,(regions.shape[0],regions.shape[1],data_points)).to('cpu')
+    # regions = torch.gather(regions,2,rand_inds)
+    return fps_points,regions,bad_regions

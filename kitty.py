@@ -7,6 +7,7 @@ import open3d as o3d
 import random
 from config import *
 from pointcloud_partitioning import pc_partition
+from pointcloud_partitioning import farthest_point_sample
 
 def pc_normalize(pc):
     centroid = np.mean(pc, axis=0)
@@ -128,6 +129,12 @@ class KittyDataset(torch_data.Dataset):
         t = t.astype('float32')
         v = t[:, 0:3]
 
+        x = np.bitwise_and(v[:, 0] < 100, v[:, 0] > 0)
+        x = np.bitwise_and(x, v[:, 2] < 10)
+        x = np.bitwise_and(x, v[:, 2] > -10)
+        v = v[x]
+
+
         lines = [x.strip() for x in open(label_path).readlines()]
         gt = -np.ones((self.max_objects, 15)) * 1000
         ind = -1
@@ -155,28 +162,33 @@ class KittyDataset(torch_data.Dataset):
         # p = p.voxel_down_sample(voxel_size=0.1)
 
         # t = np.asarray(p.points)
-        contain_car = np.random.choice([False, True], size=(1,), p=[0.5, 0.5])
+        contain_car = np.random.choice([False, True], size=(1,), p=[0.3, 0.7])
         if ind == -1:
             return self.__getitem__(np.random.randint(low=0, high=self.__len__()))
         rnd = np.random.randint(low=0, high=ind + 1)
-        # t, box_data = self.object_points(v, gt[rnd], random=True,contain_car=contain_car[0])
-        x = np.bitwise_and(v[:, 0] < 100, v[:, 0] > 0)
-        x = np.bitwise_and(x, v[:, 2] < 10)
-        x = np.bitwise_and(x, v[:, 2] > -10)
-        v = v[x]
+        t, box_data = self.object_points(v, gt[rnd], random=True,contain_car=contain_car[0])
+        t = v[t, :]
 
-        _,regions = pc_partition(torch.from_numpy(v[np.newaxis,:,:]).to('cpu'))
-        regions = regions[0].cpu().detach().numpy()
-        random_slice = np.random.choice(farthest_point_num,(farthest_point_num,),replace=False)
+        if t.shape[0] < minimum_number_of_points:
+            return self.__getitem__(np.random.randint(low=0, high=self.__len__()))
 
-        for i in range(random_slice.shape[0]):
-            if np.unique(regions[random_slice[i]]).shape[0] < 400:
-                continue
-            t = v[regions[random_slice[i]], :]
-            break
+        # x = np.bitwise_and(v[:, 0] < 100, v[:, 0] > 0)
+        # x = np.bitwise_and(x, v[:, 2] < 10)
+        # x = np.bitwise_and(x, v[:, 2] > -10)
+        # v = v[x]
 
-        # random_indices = np.random.choice(t.shape[0], self.npoints, replace=True)
-        # t = t[random_indices, :3]
+        # _,regions = pc_partition(torch.from_numpy(v[np.newaxis,:,:]).to('cpu'))
+        # regions = regions[0].cpu().detach().numpy()
+        # random_slice = np.random.choice(farthest_point_num,(farthest_point_num,),replace=False)
+
+        # for i in range(random_slice.shape[0]):
+        #     if np.unique(regions[random_slice[i]]).shape[0] < 400:
+        #         continue
+        #     t = v[regions[random_slice[i]], :]
+        #     break
+
+        random_indices = np.random.choice(t.shape[0], self.npoints, replace=True)
+        t = t[random_indices, :3]
 
         corresponding_bbox = np.ones((t.shape[0],)) * -1000
         for i in inds:
@@ -195,7 +207,7 @@ class KittyDataset(torch_data.Dataset):
         centroid, m, t = pc_normalize(t)
         t = t.astype(float)
 
-        return t, gt, corresponding_bbox, centroid, m, rnd, 1
+        return t, gt, corresponding_bbox, centroid, m, rnd, box_data
 
     def find_bbox_size(self, points):
         """
@@ -217,6 +229,8 @@ class KittyDataset(torch_data.Dataset):
 
     def object_points(self, p, gt, random=False, contain_car = True):
         idx = int(gt[11])
+        P2, R0, Tr = self.all_calib['P2'][idx], self.all_calib['R0'][idx], self.all_calib['Tr'][idx]
+
         # s = int(self.image_idx_list[idx])
         # image = cv2.imread(os.path.join(self.image_dir, '%06d.png' % s))
 
@@ -235,13 +249,28 @@ class KittyDataset(torch_data.Dataset):
             center[1] = center[1] - extents[1] / 2
             box_data[3:6] = np.copy(extents)
         else:
-            center = np.random.normal([-5,0,15],2,(3,))
+            # center = np.random.normal([-5,0,15],2,(3,))
+            # center[1] = 0.7
+
+            p_prime = torch.from_numpy(p[np.newaxis,:,:])
+            fps = farthest_point_sample(p_prime, farthest_point_num)
+            fps_points = torch.gather(p_prime, 1, fps[0, :, None].repeat(1, 1, 3))[0]
+
+            y = o3d.utility.Vector3dVector(p)
+            for i in np.random.permutation(farthest_point_num):
+                extents = np.flipud(sample_box_size)
+                bb = o3d.geometry.OrientedBoundingBox(center=fps_points[i].numpy(), R=np.eye(3),
+                                                      extent=extents)
+                if len(bb.get_point_indices_within_bounding_box(y)) >= minimum_number_of_points:
+                    box_data[0:3] = np.copy(fps_points[i])
+                    extents = np.flipud(sample_box_size)
+                    box_data[3:6] = np.copy(extents)
+                    return bb.get_point_indices_within_bounding_box(y), box_data
 
 
 
         box_data[0:3] = np.copy(center)
 
-        P2, R0, Tr = self.all_calib['P2'][idx], self.all_calib['R0'][idx], self.all_calib['Tr'][idx]
 
         y = np.ones((p.shape[0], 4))
         y[:, 0:3] = p
@@ -256,8 +285,8 @@ class KittyDataset(torch_data.Dataset):
         if not random:
             bb = o3d.geometry.OrientedBoundingBox(center=center, R=R, extent=extents)
         else:
-            # center = center + np.random.rand(3)*random_shift_interval
-            # box_data[0:3] = np.copy(center)
+            center = center + np.random.rand(3)*random_shift_interval
+            box_data[0:3] = np.copy(center)
             extents = np.flipud(sample_box_size)
             box_data[3:6] = np.copy(extents)
             bb = o3d.geometry.OrientedBoundingBox(center=center , R=np.eye(3),

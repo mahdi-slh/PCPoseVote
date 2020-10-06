@@ -14,9 +14,9 @@ def compute_box_loss(gt: torch.Tensor, objectness_label: torch.Tensor, objectnes
     gt_center = torch.gather(gt[:, :, 12:15], 1, x)
     gt_size = torch.gather(gt[:, :, 4:7], 1, x)
 
-    total = (torch.sum(objectness_label, 1))+ 1e-6
-    center_loss = torch.sum(torch.sum((pred_center - gt_center) ** 2, 2) * objectness_label,1) / total
-    size_loss = torch.sum(torch.sum((pred_size - gt_size) ** 2, 2) * objectness_label,1) / total
+    total = torch.sum(objectness_label)+ 1e-6
+    center_loss = (torch.sum((pred_center - gt_center) ** 2, 2) * objectness_label) / total
+    size_loss = torch.sum((pred_size - gt_size) ** 2, 2) * objectness_label / total
     criterion = torch.nn.CrossEntropyLoss(torch.from_numpy(OBJECTNESS_CLS_WEIGHTS).to(device).to(torch.float32),
                                           reduction='none')
 
