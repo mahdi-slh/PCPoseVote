@@ -10,6 +10,7 @@ from pointcloud_partitioning import pc_partition
 import numpy as np
 import loss
 import time
+from write_results import write_results
 
 test_set = KittyDataset(PATH, split='test')
 test_loader = torch_data.DataLoader(test_set, shuffle=True, batch_size=batch_size, num_workers=1)
@@ -51,6 +52,10 @@ def add_gt_boundingbox(gtt, box_data):
         R[0] = [np.cos(gt[10]), 0.0, np.sin(gt[10])]
         R[1] = [0, 1, 0]
         R[2] = [-np.sin(gt[10]), 0.0, np.cos(gt[10])]
+        print("gt:")
+        print(gt[7:10])
+        print(gt[3:6])
+        print("_____________")
         center = gt[7:10].copy()
         center[1] = center[1] - gt[5] / 2
         # sphere = o3d.geometry.TriangleMesh.create_sphere(radius=NEAR_THRESHOLD)
@@ -66,8 +71,10 @@ def add_gt_boundingbox(gtt, box_data):
     vis.add_geometry(bb2)
 
 
-def add_all_gt_boundingboxes(gtt):
+def add_all_gt_boundingboxes(gtt, id):
+    r = 0
     for i in range(gtt.shape[0]):
+        r = i
         gt = gtt[i]
         if gt[0] == -1000:
             break
@@ -75,11 +82,13 @@ def add_all_gt_boundingboxes(gtt):
         R[0] = [np.cos(gt[10]), 0.0, np.sin(gt[10])]
         R[1] = [0, 1, 0]
         R[2] = [-np.sin(gt[10]), 0.0, np.cos(gt[10])]
+
         center = gt[7:10].copy()
         center[1] = center[1] - gt[5] / 2
         bb = o3d.geometry.OrientedBoundingBox(center=center, R=R, extent=gt[6:3:-1])
         bb.color = [1, 1, 1]
         vis.add_geometry(bb)
+    write_results(test_set.image_idx_list[int(id)], centers=gtt[0:r, 7:10], sizes=gtt[0:r, 4:7], angles=gtt[0:r,10 ], scores=[0.2] * r)
 
 
 # def add_pred_boundingbox(all_results, idx, angles, all_proposals, ind1, batch_index):
@@ -187,8 +196,8 @@ def nms(bbox_list, confidence_scores):
         new_indices = list(range(len(bbox_list)))
         max_ind = int(torch.argmax(confidence_scores))
         final_boxes.append(bbox_list[max_ind])
-        print("___________________")
-        print(max_ind)
+        # print("___________________")
+        # print(max_ind)
         new_indices.remove(max_ind)
         for i in range(len(bbox_list)):
             if i == max_ind:
@@ -205,19 +214,19 @@ def nms(bbox_list, confidence_scores):
             dz = min(zmax_1, zmax_2) - max(zmin_1, zmin_2)
 
             if dx >= 0 and dy >= 0 and dz >= 0:
-                if dx * dy * dz >= 0.2 * (bbox_list[i].volume()):
-                    print("deleted: ", i)
+                if dx * dy * dz >= 0.5:
+                    # print("deleted: ", i)
                     new_indices.remove(i)
 
         bbox_list = [bbox_list[i] for i in new_indices]
         confidence_scores = confidence_scores[new_indices]
     return final_boxes
 
-def interpret_result(result, gt):
+
+def interpret_result(result, gt,idx):
     """
         :param result: [batch_size * num_proposal,9]
     """
-    print(result.shape)
     # gt = torch.from_numpy(gt).to(device)
     result_rev = result.transpose(0, 1)
     pred_car_prob = torch.nn.functional.softmax(result[:, 7:9])[:, 1]
@@ -227,11 +236,23 @@ def interpret_result(result, gt):
     _, ind, _, _ = nn_distance(result[None, :, 1:4], gt[None, :, 12:15])
 
     proposals = (pred_car_prob > 0.99999).nonzero()
-    # proposals = torch.tensor([1457,1468]).long()
     bbox_list = add_pred_bb(result_rev.detach().cpu().numpy(), idx, gt[:, 10], proposals,
                             ind[0])
-    final_bboxes = nms(bbox_list, pred_car_prob[proposals])
 
+    final_bboxes = nms(bbox_list, pred_car_prob[proposals])
+    centers = np.ndarray((len(final_bboxes),3))
+    sizes = np.ndarray((len(final_bboxes),3))
+    angles = np.ndarray((len(final_bboxes),))
+    scores = np.ndarray((len(final_bboxes),))
+    xyz = np.zeros((3,1),dtype=np.float)
+    xyz[1,0] = 1
+    for i in range(len(final_bboxes)):
+        centers[i] = final_bboxes[i].get_center()
+        centers[i,1] = final_bboxes[i].get_max_bound()[1]
+        sizes[i] = final_bboxes[i].get_max_bound() - final_bboxes[i].get_min_bound()
+        angles[i] = np.arccos(final_bboxes[i].R[0,0])
+        scores[i] = torch.log((pred_car_prob[pred_car_prob>0.99])[i])
+    write_results(test_set.image_idx_list[int(idx)],centers,sizes,angles,scores)
     for box in final_bboxes:
         vis.add_geometry(box)
 
@@ -244,7 +265,6 @@ if __name__ == '__mai__':
     param = o3d.io.read_pinhole_camera_parameters('o3d_config/view.json')
 
     data, gt, corresponding_bbox, centroid, m, _, box_data = next(iter(test_loader))
-    print(data.shape)
     data = data.to(torch.float32)
     data = data.to(device)
     gt = gt.to(device)
@@ -332,25 +352,90 @@ if __name__ == '__mai__':
         p.colors = o3d.utility.Vector3dVector(colors)
         vis.add_geometry(p)
 
-    interpret_result(result[no_in_batch].transpose(0, 1), gt[no_in_batch])
+    interpret_result(result[no_in_batch].transpose(0, 1), gt[no_in_batch],idx)
     add_gt_boundingbox(gt[no_in_batch], box_data[no_in_batch])
 
     vis.get_view_control().convert_from_pinhole_camera_parameters(param)
     vis.run()
 
-if __name__ == '__main__':
+def myres_write():
+    torch.manual_seed(43)
+    for idx in range(0,3769):
+        main_points = get_all_points(idx)[:, 0:3]
+        x = np.bitwise_and(main_points[:, 0] < 100, main_points[:, 0] > 0)
+        x = np.bitwise_and(x, main_points[:, 2] < 10)
+        x = np.bitwise_and(x, main_points[:, 2] > -3)
+        main_points = main_points[x]
+        fps_points, partitions, _ = pc_partition(torch.from_numpy(main_points[np.newaxis, :, :]).to('cpu'))
 
+        partitions = partitions.detach().cpu().numpy()
+
+        checkpoint = torch.load(SAVE_PATH)
+        model = Votenet(num_class=2, num_heading_bin=2, num_size_cluster=2, mean_size_arr=np.zeros((3, 1)),
+                        input_feature_dim=2)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.to(device)
+
+        data = main_points[partitions[0]]
+        # print(data[0])
+        # exit(1231)
+        input = torch.zeros(data.shape[0], data_points, 3).to(device)
+        centroid = torch.zeros(data.shape[0], 3).to(device)
+        m = torch.zeros(data.shape[0]).to(device)
+        for i in range(farthest_point_num):
+            c_, m_, pc = kitty.pc_normalize(data[i])
+            input[i] = torch.from_numpy(pc).to(device)
+            m[i] = torch.from_numpy(np.array([m_])).to(device)
+            centroid[i] = torch.from_numpy(c_).to(device)
+
+        all_results = torch.zeros(64, 9, 64).to(device)
+
+        for i in range(4):
+            with torch.no_grad():
+                initial_inds = torch.unsqueeze(torch.arange(start=0, end=input.shape[1]), 0).repeat(batch_size, 1).to(
+                    device)
+                _, _, result, _, _ = model(input[i * batch_size:(i + 1) * batch_size], initial_inds)
+                all_results[i * batch_size:(i + 1) * batch_size] = result.clone()
+                all_results[i * batch_size:(i + 1) * batch_size, 1:7, :] = all_results[
+                                                                           i * batch_size:(i + 1) * batch_size,
+                                                                           1:7, :] * m[i * batch_size:(
+                                                                                                                  i + 1) * batch_size,
+                                                                                     None, None]
+                all_results[i * batch_size:(i + 1) * batch_size:, 1:4, :] = all_results[
+                                                                            i * batch_size:(i + 1) * batch_size,
+                                                                            1:4, :] + centroid[
+                                                                                      i * batch_size:(
+                                                                                                                 i + 1) * batch_size,
+                                                                                      :, None]
+        all_results = all_results.transpose(1, 2)
+
+        test_set.__getitem__(idx)
+
+        all_results = all_results.reshape(-1, 9)
+        gt = get_gt(idx)
+
+        interpret_result(all_results, torch.from_numpy(gt).to(device),idx)
+
+
+def gt_write():
+    for idx in range(0,3769):
+        gt = get_gt(idx)
+        add_all_gt_boundingboxes(gt, idx)
+
+if __name__ == '__main__':
+    # myres_write()
+    # exit(1121)
     torch.manual_seed(43)
     vis = o3d.visualization.VisualizerWithKeyCallback()
     vis.create_window(width=1920, height=1001, left=0, top=30)
     vis.get_render_option().load_from_json('o3d_config/render_option.json')
     param = o3d.io.read_pinhole_camera_parameters('o3d_config/view.json')
 
-    idx = 119
+    idx = 2251
     main_points = get_all_points(idx)[:, 0:3]
     x = np.bitwise_and(main_points[:, 0] < 100, main_points[:, 0] > 0)
     x = np.bitwise_and(x, main_points[:, 2] < 10)
-    x = np.bitwise_and(x, main_points[:, 2] > -10)
+    x = np.bitwise_and(x, main_points[:, 2] > -3)
     main_points = main_points[x]
     main_points_vis = get_points(main_points, idx)
 
@@ -373,6 +458,7 @@ if __name__ == '__main__':
     model.to(device)
 
     data = main_points[partitions[0]]
+
     input = torch.zeros(data.shape[0], data_points, 3).to(device)
     centroid = torch.zeros(data.shape[0], 3).to(device)
     m = torch.zeros(data.shape[0]).to(device)
@@ -382,9 +468,9 @@ if __name__ == '__main__':
         m[i] = torch.from_numpy(np.array([m_])).to(device)
         centroid[i] = torch.from_numpy(c_).to(device)
 
-    all_results = torch.zeros(64, 9, 64).to(device)
+    all_results = torch.zeros(farthest_point_num, 9, 64).to(device)
 
-    for i in range(4):
+    for i in range(8):
         with torch.no_grad():
             initial_inds = torch.unsqueeze(torch.arange(start=0, end=input.shape[1]), 0).repeat(batch_size, 1).to(
                 device)
@@ -398,13 +484,11 @@ if __name__ == '__main__':
                                                                                   i * batch_size:(i + 1) * batch_size,
                                                                                   :, None]
     all_results = all_results.transpose(1, 2)
-    # all_results = all_results[13]
 
     test_set.__getitem__(idx)
 
     all_results = all_results.reshape(-1, 9)
 
-    # all_results = all_results[0]
 
     for i in range(0, farthest_point_num):
         x = main_points[partitions[0, i]]
@@ -430,14 +514,8 @@ if __name__ == '__main__':
     # vis.add_geometry(p)
     # print("gt object:", rnd[batch_index])
     gt = get_gt(idx)
-    add_all_gt_boundingboxes(gt)
+    add_all_gt_boundingboxes(gt, idx)
     # all_results = torch.zeros(12,9).to(device)
-
-    t = -1
-    for i in range(20):
-        if gt[i][0] == -1000:
-            t = i
-            break
 
     # s = np.random.choice(t,(12))
     # all_results[:,1:4] = torch.from_numpy(gt[s,12:15]).to(device)
@@ -446,7 +524,7 @@ if __name__ == '__main__':
     # all_results[:,1:4] = all_results[:,1:4] + torch.rand(all_results.shape[0],3).to(device)*1.5
     # all_results[:,4:7] = all_results[:,4:7] + torch.rand(all_results.shape[0],3).to(device)
 
-    interpret_result(all_results, torch.from_numpy(gt).to(device))
+    interpret_result(all_results, torch.from_numpy(gt).to(device),idx)
 
     vis.get_view_control().convert_from_pinhole_camera_parameters(param)
     vis.run()

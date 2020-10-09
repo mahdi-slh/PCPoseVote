@@ -87,7 +87,6 @@ def pc_partition(pc):
         extents = np.flipud(sample_box_size)
         bb = o3d.geometry.OrientedBoundingBox(center=center , R=np.eye(3),
                                               extent=extents)
-        print(len(np.asarray(bb.get_point_indices_within_bounding_box(y))))
         if len(np.asarray(bb.get_point_indices_within_bounding_box(y))) < minimum_number_of_points:
             bad_regions.append(i)
         indices = np.random.choice(np.asarray(bb.get_point_indices_within_bounding_box(y)),data_points)
